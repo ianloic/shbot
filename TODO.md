@@ -5,10 +5,10 @@ required to make `shbot` production-ready.
 
 ## 1. Dynamic File Watcher Registration
 
-- [ ] Refactor `SyncWatcher` to dynamically call
+- [x] Refactor `SyncWatcher` to dynamically call
       `watcher.watch(path, RecursiveMode::Recursive)` when a client sends a
       `cd <path>` socket command.
-- [ ] Implement un-watching logic to gracefully drop paths when the final shell
+- [x] Implement un-watching logic to gracefully drop paths when the final shell
       client navigates away from them to preserve system resources.
 
 ## 2. Packaging and Systemd Integration

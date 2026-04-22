@@ -80,7 +80,9 @@ fn handle_daemon() -> anyhow::Result<()> {
             error!("Failed to start SyncWatcher: {}", e);
         }
 
-        if let Err(e) = server::run_server(state.clone(), config.clone(), socket_path).await {
+        if let Err(e) =
+            server::run_server(state.clone(), config.clone(), watcher.clone(), socket_path).await
+        {
             error!("Server loop exited: {}", e);
         }
     });

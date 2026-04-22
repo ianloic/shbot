@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::git::get_git_state;
 use crate::runner::evaluate_file_triggers;
 use crate::state::{AppState, Pid};
+use crate::watcher::SyncWatcher;
 use anyhow::Result;
 use listenfd::ListenFd;
 use std::path::PathBuf;
@@ -13,6 +14,7 @@ use tracing::{error, info, warn};
 pub async fn run_server(
     state: Arc<AppState>,
     config: Arc<Config>,
+    watcher: Arc<SyncWatcher>,
     socket_path: PathBuf,
 ) -> Result<()> {
     let mut listenfd = ListenFd::from_env();
@@ -39,8 +41,11 @@ pub async fn run_server(
             Ok((stream, _addr)) => {
                 let state_clone = state.clone();
                 let config_clone = config.clone();
+                let watcher_clone = watcher.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, state_clone, config_clone).await {
+                    if let Err(e) =
+                        handle_connection(stream, state_clone, config_clone, watcher_clone).await
+                    {
                         error!("Connection error: {}", e);
                     }
                 });
@@ -56,6 +61,7 @@ async fn handle_connection(
     stream: UnixStream,
     state: Arc<AppState>,
     config: Arc<Config>,
+    watcher: Arc<SyncWatcher>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -104,8 +110,16 @@ async fn handle_connection(
             }
             "cd" => {
                 if let Some(pid) = client_pid {
+                    let old_cwd = state.get_cwd(pid).await;
                     let path = PathBuf::from(arg);
                     state.update_cwd(pid, path.clone()).await;
+
+                    watcher.watch(&path);
+                    if let Some(old) = old_cwd {
+                        if old != path && !state.is_cwd_active(&old).await {
+                            watcher.unwatch(&old);
+                        }
+                    }
 
                     if let Ok(Some((_, git_state))) = get_git_state(&path) {
                         state.send_to(pid, "git", &git_state.to_payload()).await;
@@ -139,7 +153,13 @@ async fn handle_connection(
 
     if let Some(pid) = client_pid {
         info!("Client disconnected: PID {}", pid);
+        let old_cwd = state.get_cwd(pid).await;
         state.remove_client(pid).await;
+        if let Some(old) = old_cwd {
+            if !state.is_cwd_active(&old).await {
+                watcher.unwatch(&old);
+            }
+        }
     }
 
     writer_task.abort();
