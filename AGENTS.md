@@ -23,6 +23,12 @@ communicates over the socket, or change the lifecycle hooks in the Zsh plugin,
 please ensure those changes are accurately reflected in `ARCHITECTURE.md` as
 part of your commit.
 
+Additionally, the project backlog is maintained in `TODO.md` in the root of the
+repository. **As you complete items from the backlog or discover new
+improvements that need to be made, you must keep `TODO.md` up to date.** Mark
+completed tasks and append any new architectural or technical debt items you
+find.
+
 ## 3. Development Guidelines
 
 - **Rust Code**: Located in `daemon/`. Ensure all warnings are resolved and
@@ -37,5 +43,5 @@ part of your commit.
 - **Formatting**: ALWAYS ensure that all files (Rust, Zsh, and Markdown) are
   correctly formatted before landing any changes or proposing PRs. To quickly
   format the entire repository simply run `./scripts/fmt.sh` from the repository
-  root. It will automatically download required formatters (`shfmt` and `dprint`) 
-  if they are not globally installed.
+  root. It will automatically download required formatters (`shfmt` and
+  `dprint`) if they are not globally installed.
