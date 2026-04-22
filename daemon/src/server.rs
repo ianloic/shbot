@@ -13,7 +13,8 @@ use tracing::{error, info, warn};
 
 pub async fn run_server(
     state: Arc<AppState>,
-    config: Arc<Config>,
+    config_rx: tokio::sync::watch::Receiver<Config>,
+    config_tx: tokio::sync::watch::Sender<Config>,
     watcher: Arc<SyncWatcher>,
     socket_path: PathBuf,
 ) -> Result<()> {
@@ -40,11 +41,18 @@ pub async fn run_server(
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let state_clone = state.clone();
-                let config_clone = config.clone();
+                let config_rx_clone = config_rx.clone();
+                let config_tx_clone = config_tx.clone();
                 let watcher_clone = watcher.clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        handle_connection(stream, state_clone, config_clone, watcher_clone).await
+                    if let Err(e) = handle_connection(
+                        stream,
+                        state_clone,
+                        config_rx_clone,
+                        config_tx_clone,
+                        watcher_clone,
+                    )
+                    .await
                     {
                         error!("Connection error: {}", e);
                     }
@@ -60,7 +68,8 @@ pub async fn run_server(
 async fn handle_connection(
     stream: UnixStream,
     state: Arc<AppState>,
-    config: Arc<Config>,
+    config_rx: tokio::sync::watch::Receiver<Config>,
+    config_tx: tokio::sync::watch::Sender<Config>,
     watcher: Arc<SyncWatcher>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
@@ -126,10 +135,33 @@ async fn handle_connection(
                     } else {
                         state.send_to(pid, "git", "").await;
                     }
+                    let config = config_rx.borrow().clone();
                     evaluate_file_triggers(&path, &state, &config).await;
                 } else {
                     warn!("Received cd before hello");
                 }
+            }
+            "reload" => {
+                info!("Reload request received via socket");
+                match Config::load() {
+                    Ok(new_config) => {
+                        if let Err(e) = config_tx.send(new_config) {
+                            error!("Failed to broadcast config on reload: {}", e);
+                            let _ =
+                                tx.try_send("error: failed to broadcast new config\n".to_string());
+                        } else {
+                            let _ = tx.try_send(
+                                "status: configuration reloaded successfully\n".to_string(),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to reload config: {}", e);
+                        let _ = tx.try_send(format!("error: failed to load config - {}\n", e));
+                    }
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                break;
             }
             "invalidate" => {
                 info!("Invalidate request for: {}", arg);

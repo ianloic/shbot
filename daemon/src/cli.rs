@@ -20,4 +20,6 @@ pub enum Commands {
     Daemon,
     /// Requests the current internal state from the running daemon
     Status,
+    /// Reloads the configuration file dynamically
+    Reload,
 }

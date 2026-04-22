@@ -20,10 +20,10 @@ required to make `shbot` production-ready.
 
 ## 3. Configuration Hot-Reloading
 
-- [ ] Setup signal handlers (e.g. `SIGHUP`) or a custom `--reload` argument tied
+- [x] Setup signal handlers (e.g. `SIGHUP`) or a custom `--reload` argument tied
       to the Unix socket that triggers the daemon to reread
       `~/.config/shbot/shbot.toml`.
-- [ ] Safely hotswap the `Arc<Config>` across all asynchronous loops on reload
+- [x] Safely hotswap the `Arc<Config>` across all asynchronous loops on reload
       without dropping client connections.
 
 ## 4. Advanced "File-Change" Trigger Patterns

@@ -25,7 +25,11 @@ impl SyncWatcher {
         })
     }
 
-    pub fn start(&self, state: Arc<AppState>, config: Arc<Config>) -> anyhow::Result<()> {
+    pub fn start(
+        &self,
+        state: Arc<AppState>,
+        config_rx: tokio::sync::watch::Receiver<Config>,
+    ) -> anyhow::Result<()> {
         let dirty_dirs_clone = self.dirty_dirs.clone();
 
         let watcher = RecommendedWatcher::new(
@@ -58,6 +62,7 @@ impl SyncWatcher {
 
                 if !to_process.is_empty() {
                     let unique_cwds = state.get_unique_cwds().await;
+                    let config = config_rx.borrow().clone();
                     for cwd in unique_cwds {
                         if let Ok(Some((_, git_state))) = get_git_state(&cwd) {
                             state

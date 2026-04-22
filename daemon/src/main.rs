@@ -11,7 +11,7 @@ use cli::{Cli, Commands};
 use daemonize::Daemonize;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
@@ -32,6 +32,11 @@ fn main() -> anyhow::Result<()> {
         Commands::Status => {
             if let Err(e) = handle_status() {
                 eprintln!("Failed to get status: {}", e);
+            }
+        }
+        Commands::Reload => {
+            if let Err(e) = handle_reload() {
+                eprintln!("Failed to reload: {}", e);
             }
         }
     }
@@ -59,9 +64,29 @@ fn handle_status() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn handle_reload() -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let socket_path = get_socket_path()?;
+    if !socket_path.exists() {
+        println!("Daemon is not running (socket empty).");
+        return Ok(());
+    }
+
+    let mut stream = UnixStream::connect(&socket_path)?;
+    stream.write_all(b"reload\n")?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+
+    println!("{}", response.trim());
+    Ok(())
+}
+
 fn handle_daemon() -> anyhow::Result<()> {
     // Load config
-    let config = Arc::new(config::Config::load()?);
+    let config = config::Config::load()?;
     let socket_path = get_socket_path()?;
 
     // Spin up the async tokio runtime *after* any potential forks
@@ -73,15 +98,42 @@ fn handle_daemon() -> anyhow::Result<()> {
         info!("Async runtime initialized!");
         let state = state::AppState::new();
 
-        runner::start_periodic_triggers(state.clone(), config.clone());
+        let (config_tx, config_rx) = tokio::sync::watch::channel(config);
+
+        let sighup_tx = config_tx.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            if let Ok(mut sig) = signal(SignalKind::hangup()) {
+                while let Some(_) = sig.recv().await {
+                    info!("Received SIGHUP, reloading configuration");
+                    if let Ok(new_config) = config::Config::load() {
+                        if let Err(e) = sighup_tx.send(new_config) {
+                            error!("Failed to broadcast config on SIGHUP: {}", e);
+                        }
+                    } else {
+                        error!("Failed to parse shbot.toml config on SIGHUP");
+                    }
+                }
+            } else {
+                error!("Failed to register SIGHUP signal handler");
+            }
+        });
+
+        runner::start_periodic_triggers(state.clone(), config_rx.clone());
 
         let watcher = watcher::SyncWatcher::new();
-        if let Err(e) = watcher.start(state.clone(), config.clone()) {
+        if let Err(e) = watcher.start(state.clone(), config_rx.clone()) {
             error!("Failed to start SyncWatcher: {}", e);
         }
 
-        if let Err(e) =
-            server::run_server(state.clone(), config.clone(), watcher.clone(), socket_path).await
+        if let Err(e) = server::run_server(
+            state.clone(),
+            config_rx.clone(),
+            config_tx.clone(),
+            watcher.clone(),
+            socket_path,
+        )
+        .await
         {
             error!("Server loop exited: {}", e);
         }
