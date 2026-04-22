@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 pub type Pid = u32;
 
@@ -49,7 +49,7 @@ impl AppState {
             let _ = client.sender.try_send(msg.clone());
         }
     }
-    
+
     pub async fn broadcast_all(&self, state_id: &str, payload: &str) {
         let clients = self.clients.read().await;
         let msg = format!("update {} {}\n", state_id, payload);
@@ -77,9 +77,13 @@ impl AppState {
 
     pub async fn get_unique_cwds(&self) -> HashSet<PathBuf> {
         let clients = self.clients.read().await;
-        clients.values().map(|c| c.cwd.clone()).filter(|p| p.components().count() > 0).collect()
+        clients
+            .values()
+            .map(|c| c.cwd.clone())
+            .filter(|p| p.components().count() > 0)
+            .collect()
     }
-    
+
     pub async fn get_client_count(&self) -> usize {
         let clients = self.clients.read().await;
         clients.len()

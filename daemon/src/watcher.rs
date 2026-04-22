@@ -56,9 +56,11 @@ impl SyncWatcher {
                     let unique_cwds = state.get_unique_cwds().await;
                     for cwd in unique_cwds {
                         if let Ok(Some((_, git_state))) = get_git_state(&cwd) {
-                            state.broadcast_to_cwd(&cwd, "git", &git_state.to_payload()).await;
+                            state
+                                .broadcast_to_cwd(&cwd, "git", &git_state.to_payload())
+                                .await;
                         }
-                        
+
                         evaluate_file_triggers(&cwd, &state, &config).await;
                     }
                 }

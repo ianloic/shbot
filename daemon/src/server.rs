@@ -10,9 +10,13 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{error, info, warn};
 
-pub async fn run_server(state: Arc<AppState>, config: Arc<Config>, socket_path: PathBuf) -> Result<()> {
+pub async fn run_server(
+    state: Arc<AppState>,
+    config: Arc<Config>,
+    socket_path: PathBuf,
+) -> Result<()> {
     let mut listenfd = ListenFd::from_env();
-    
+
     // Check if systemd passed us a listener
     let listener = if let Some(std_listener) = listenfd.take_unix_listener(0)? {
         info!("Using systemd socket activation");
@@ -25,7 +29,7 @@ pub async fn run_server(state: Arc<AppState>, config: Arc<Config>, socket_path: 
         } else if let Some(p) = socket_path.parent() {
             std::fs::create_dir_all(p)?;
         }
-        
+
         info!("Binding to socket: {:?}", socket_path);
         UnixListener::bind(&socket_path)?
     };
@@ -48,13 +52,17 @@ pub async fn run_server(state: Arc<AppState>, config: Arc<Config>, socket_path: 
     }
 }
 
-async fn handle_connection(stream: UnixStream, state: Arc<AppState>, config: Arc<Config>) -> Result<()> {
+async fn handle_connection(
+    stream: UnixStream,
+    state: Arc<AppState>,
+    config: Arc<Config>,
+) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(100);
-    
+
     // We don't know the PID until the client says `hello <pid>`
     let mut client_pid: Option<Pid> = None;
 
@@ -98,7 +106,7 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>, config: Arc
                 if let Some(pid) = client_pid {
                     let path = PathBuf::from(arg);
                     state.update_cwd(pid, path.clone()).await;
-                    
+
                     if let Ok(Some((_, git_state))) = get_git_state(&path) {
                         state.send_to(pid, "git", &git_state.to_payload()).await;
                     } else {
@@ -118,7 +126,7 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>, config: Arc
                 let count = state.get_client_count().await;
                 let dump = format!("status: {} clients connected\n", count);
                 let _ = tx.try_send(dump);
-                
+
                 // Yield to ensure the writer has a chance to write before we break and close the socket.
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 break;

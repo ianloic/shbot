@@ -38,7 +38,7 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
     let Some(workdir) = repo.workdir() else {
         return Ok(None); // Bare repo
     };
-    
+
     let root = workdir.to_path_buf();
 
     let mut state = GitState::default();
@@ -62,7 +62,9 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
                     if let Ok(upstream_commit) = upstream_obj.peel_to_commit() {
                         let local_oid = head.target().unwrap();
                         let upstream_oid = upstream_commit.id();
-                        if let Ok((ahead, behind)) = repo.graph_ahead_behind(local_oid, upstream_oid) {
+                        if let Ok((ahead, behind)) =
+                            repo.graph_ahead_behind(local_oid, upstream_oid)
+                        {
                             state.ahead = ahead;
                             state.behind = behind;
                         }
@@ -90,11 +92,22 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
                 continue;
             }
 
-            if s.intersects(git2::Status::INDEX_NEW | git2::Status::INDEX_MODIFIED | git2::Status::INDEX_DELETED | git2::Status::INDEX_RENAMED | git2::Status::INDEX_TYPECHANGE) {
+            if s.intersects(
+                git2::Status::INDEX_NEW
+                    | git2::Status::INDEX_MODIFIED
+                    | git2::Status::INDEX_DELETED
+                    | git2::Status::INDEX_RENAMED
+                    | git2::Status::INDEX_TYPECHANGE,
+            ) {
                 state.staged += 1;
             }
 
-            if s.intersects(git2::Status::WT_MODIFIED | git2::Status::WT_DELETED | git2::Status::WT_TYPECHANGE | git2::Status::WT_RENAMED) {
+            if s.intersects(
+                git2::Status::WT_MODIFIED
+                    | git2::Status::WT_DELETED
+                    | git2::Status::WT_TYPECHANGE
+                    | git2::Status::WT_RENAMED,
+            ) {
                 state.unstaged += 1;
             }
 

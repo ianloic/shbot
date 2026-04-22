@@ -12,7 +12,7 @@ use daemonize::Daemonize;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{error, info, Level};
+use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
 fn main() -> anyhow::Result<()> {
@@ -51,10 +51,10 @@ fn handle_status() -> anyhow::Result<()> {
 
     let mut stream = UnixStream::connect(&socket_path)?;
     stream.write_all(b"status\n")?;
-    
+
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
-    
+
     println!("{}", response.trim());
     Ok(())
 }
@@ -68,13 +68,13 @@ fn handle_daemon() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    
+
     rt.block_on(async {
         info!("Async runtime initialized!");
         let state = state::AppState::new();
-        
+
         runner::start_periodic_triggers(state.clone(), config.clone());
-        
+
         let watcher = watcher::SyncWatcher::new();
         if let Err(e) = watcher.start(state.clone(), config.clone()) {
             error!("Failed to start SyncWatcher: {}", e);
@@ -84,7 +84,7 @@ fn handle_daemon() -> anyhow::Result<()> {
             error!("Server loop exited: {}", e);
         }
     });
-    
+
     Ok(())
 }
 
@@ -104,7 +104,7 @@ fn setup_logging(log_file: Option<&Path>) -> anyhow::Result<()> {
         let subscriber = subscriber.finish();
         tracing::subscriber::set_global_default(subscriber)?;
     }
-    
+
     Ok(())
 }
 
@@ -114,7 +114,7 @@ fn handle_connect() -> anyhow::Result<()> {
 
     let pid_file = state_dir.join("shbot.pid");
     let log_file = state_dir.join("shbot.log");
-    
+
     let stdout = std::fs::File::create(&log_file)?;
     let stderr = std::fs::File::create(&log_file)?;
 
@@ -144,20 +144,20 @@ fn handle_connect() -> anyhow::Result<()> {
 pub fn get_socket_path() -> anyhow::Result<PathBuf> {
     let base_dirs = directories::ProjectDirs::from("", "", "shbot")
         .ok_or_else(|| anyhow::anyhow!("Could not find valid home directory"))?;
-    
+
     let _state_dir = base_dirs.data_local_dir(); // Usually ~/.local/share/shbot
     // But spec explicitly says ~/.local/state/shbot/socket/${HOSTNAME}.socket
     // We can use std::env::var("HOME").unwrap() + "/.local/state/shbot/socket/..."
-    
+
     let home = std::env::var("HOME").expect("HOME env var not set");
     let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
-    
+
     let path = PathBuf::from(home)
         .join(".local")
         .join("state")
         .join("shbot")
         .join("socket")
         .join(format!("{}.socket", host));
-        
+
     Ok(path)
 }

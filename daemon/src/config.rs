@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub struct Config {
     #[serde(default)]
     pub daemon: DaemonConfig,
-    
+
     #[serde(default)]
     pub triggers: HashMap<String, TriggerConfig>,
 }
@@ -36,19 +36,11 @@ fn default_idle_timeout() -> u64 {
 #[allow(dead_code)]
 pub enum TriggerConfig {
     #[serde(rename = "periodic")]
-    Periodic {
-        interval_sec: u64,
-        command: String,
-    },
+    Periodic { interval_sec: u64, command: String },
     #[serde(rename = "file-change")]
-    FileChange {
-        watch: String,
-        command: String,
-    },
+    FileChange { watch: String, command: String },
     #[serde(rename = "explicit")]
-    Explicit {
-        command: String,
-    },
+    Explicit { command: String },
 }
 
 impl Config {
