@@ -1,5 +1,8 @@
+use crate::config::Config;
+use crate::git::get_git_state;
+use crate::runner::evaluate_file_triggers;
 use crate::state::{AppState, Pid};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use listenfd::ListenFd;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -7,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{error, info, warn};
 
-pub async fn run_server(state: Arc<AppState>, socket_path: PathBuf) -> Result<()> {
+pub async fn run_server(state: Arc<AppState>, config: Arc<Config>, socket_path: PathBuf) -> Result<()> {
     let mut listenfd = ListenFd::from_env();
     
     // Check if systemd passed us a listener
@@ -31,8 +34,9 @@ pub async fn run_server(state: Arc<AppState>, socket_path: PathBuf) -> Result<()
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let state_clone = state.clone();
+                let config_clone = config.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, state_clone).await {
+                    if let Err(e) = handle_connection(stream, state_clone, config_clone).await {
                         error!("Connection error: {}", e);
                     }
                 });
@@ -44,7 +48,7 @@ pub async fn run_server(state: Arc<AppState>, socket_path: PathBuf) -> Result<()
     }
 }
 
-async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<()> {
+async fn handle_connection(stream: UnixStream, state: Arc<AppState>, config: Arc<Config>) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
@@ -84,7 +88,7 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
             "hello" => {
                 if let Ok(pid) = arg.parse::<Pid>() {
                     client_pid = Some(pid);
-                    state.add_client(pid, tx.clone()).await;
+                    state.add_client(pid, PathBuf::new(), tx.clone()).await;
                     info!("Client connected: PID {}", pid);
                 } else {
                     warn!("Invalid hello PID: {}", arg);
@@ -93,8 +97,14 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
             "cd" => {
                 if let Some(pid) = client_pid {
                     let path = PathBuf::from(arg);
-                    state.update_cwd(pid, path).await;
-                    // Trigger a re-evaluation of git/watcher logic here (handled by a separate module usually polling the state)
+                    state.update_cwd(pid, path.clone()).await;
+                    
+                    if let Ok(Some((_, git_state))) = get_git_state(&path) {
+                        state.send_to(pid, "git", &git_state.to_payload()).await;
+                    } else {
+                        state.send_to(pid, "git", "").await;
+                    }
+                    evaluate_file_triggers(&path, &state, &config).await;
                 } else {
                     warn!("Received cd before hello");
                 }
@@ -108,7 +118,10 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
                 let count = state.get_client_count().await;
                 let dump = format!("status: {} clients connected\n", count);
                 let _ = tx.try_send(dump);
-                // After status is satisfied we usually decouple or close.
+                
+                // Yield to ensure the writer has a chance to write before we break and close the socket.
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                break;
             }
             _ => {
                 warn!("Unknown command: {}", cmd);

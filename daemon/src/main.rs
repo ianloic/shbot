@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod git;
+mod runner;
 mod server;
 mod state;
 mod watcher;
@@ -10,6 +11,7 @@ use cli::{Cli, Commands};
 use daemonize::Daemonize;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -28,23 +30,59 @@ fn main() -> anyhow::Result<()> {
             handle_daemon()?;
         }
         Commands::Status => {
-            // handle_status().await?;
-            println!("Status stub...");
+            if let Err(e) = handle_status() {
+                eprintln!("Failed to get status: {}", e);
+            }
         }
     }
 
     Ok(())
 }
 
+fn handle_status() -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let socket_path = get_socket_path()?;
+    if !socket_path.exists() {
+        println!("Daemon is not running (socket empty).");
+        return Ok(());
+    }
+
+    let mut stream = UnixStream::connect(&socket_path)?;
+    stream.write_all(b"status\n")?;
+    
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    
+    println!("{}", response.trim());
+    Ok(())
+}
+
 fn handle_daemon() -> anyhow::Result<()> {
+    // Load config
+    let config = Arc::new(config::Config::load()?);
+    let socket_path = get_socket_path()?;
+
     // Spin up the async tokio runtime *after* any potential forks
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     
     rt.block_on(async {
-        println!("Async runtime initialized!");
-        // TODO: Start async socket server and tasks here
+        info!("Async runtime initialized!");
+        let state = state::AppState::new();
+        
+        runner::start_periodic_triggers(state.clone(), config.clone());
+        
+        let watcher = watcher::SyncWatcher::new();
+        if let Err(e) = watcher.start(state.clone(), config.clone()) {
+            error!("Failed to start SyncWatcher: {}", e);
+        }
+
+        if let Err(e) = server::run_server(state.clone(), config.clone(), socket_path).await {
+            error!("Server loop exited: {}", e);
+        }
     });
     
     Ok(())
@@ -107,7 +145,7 @@ pub fn get_socket_path() -> anyhow::Result<PathBuf> {
     let base_dirs = directories::ProjectDirs::from("", "", "shbot")
         .ok_or_else(|| anyhow::anyhow!("Could not find valid home directory"))?;
     
-    let state_dir = base_dirs.data_local_dir(); // Usually ~/.local/share/shbot
+    let _state_dir = base_dirs.data_local_dir(); // Usually ~/.local/share/shbot
     // But spec explicitly says ~/.local/state/shbot/socket/${HOSTNAME}.socket
     // We can use std::env::var("HOME").unwrap() + "/.local/state/shbot/socket/..."
     

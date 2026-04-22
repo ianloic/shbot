@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Deserialize, Default)]
+#[allow(dead_code)]
 pub struct Config {
     #[serde(default)]
     pub daemon: DaemonConfig,
@@ -11,7 +12,8 @@ pub struct Config {
     pub triggers: HashMap<String, TriggerConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct DaemonConfig {
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout_sec: u64,
@@ -29,8 +31,9 @@ fn default_idle_timeout() -> u64 {
     300 // 5 minutes
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type")]
+#[allow(dead_code)]
 pub enum TriggerConfig {
     #[serde(rename = "periodic")]
     Periodic {
