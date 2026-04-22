@@ -39,7 +39,8 @@ find.
 - **Testing**: Integration tests are housed in `integration-tests/` and use a
   `rexpect` PTY harness to properly emulate ZLE features required by the shell
   plugin. Always run these tests locally (`cd integration-tests && cargo test`)
-  when modifying socket interaction or shell commands.
+  when modifying socket interaction or shell commands. **Crucially, you must
+  always write tests for all new features, bug fixes, and improvements.**
 - **Formatting**: ALWAYS ensure that all files (Rust, Zsh, and Markdown) are
   correctly formatted before landing any changes or proposing PRs. To quickly
   format the entire repository simply run `./scripts/fmt.sh` from the repository
