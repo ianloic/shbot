@@ -1,0 +1,10 @@
+/home/ian/Projects/shbot/target/debug/deps/toml_writer-1b5d41a7682e7121.d: /home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/lib.rs /home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/integer.rs /home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/key.rs /home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/string.rs /home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/value.rs /home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/write.rs
+
+/home/ian/Projects/shbot/target/debug/deps/libtoml_writer-1b5d41a7682e7121.rmeta: /home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/lib.rs /home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/integer.rs /home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/key.rs /home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/string.rs /home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/value.rs /home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/write.rs
+
+/home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/lib.rs:
+/home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/integer.rs:
+/home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/key.rs:
+/home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/string.rs:
+/home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/value.rs:
+/home/ian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.1+spec-1.1.0/src/write.rs:
