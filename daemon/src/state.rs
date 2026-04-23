@@ -6,11 +6,11 @@ use tokio::sync::{RwLock, mpsc};
 pub type Pid = u32;
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ClientInfo {
     pub pid: Pid,
     pub cwd: PathBuf,
     pub sender: mpsc::Sender<String>,
+    pub last_state: HashMap<String, String>,
 }
 
 pub struct AppState {
@@ -26,7 +26,15 @@ impl AppState {
 
     pub async fn add_client(&self, pid: Pid, cwd: PathBuf, sender: mpsc::Sender<String>) {
         let mut clients = self.clients.write().await;
-        clients.insert(pid, ClientInfo { pid, cwd, sender });
+        clients.insert(
+            pid,
+            ClientInfo {
+                pid,
+                cwd,
+                sender,
+                last_state: HashMap::new(),
+            },
+        );
     }
 
     pub async fn remove_client(&self, pid: Pid) {
@@ -52,32 +60,56 @@ impl AppState {
     #[allow(dead_code)]
     pub async fn broadcast(&self, state_id: &str, payload: &str) {
         let msg = format!("update {} {}\n", state_id, payload);
-        let clients = self.clients.read().await;
-        for client in clients.values() {
+        let mut clients = self.clients.write().await;
+        for client in clients.values_mut() {
+            if client.last_state.get(state_id) == Some(&payload.to_string()) {
+                continue;
+            }
+            client
+                .last_state
+                .insert(state_id.to_string(), payload.to_string());
             let _ = client.sender.try_send(msg.clone());
         }
     }
 
     pub async fn broadcast_all(&self, state_id: &str, payload: &str) {
-        let clients = self.clients.read().await;
+        let mut clients = self.clients.write().await;
         let msg = format!("update {} {}\n", state_id, payload);
-        for client in clients.values() {
+        for client in clients.values_mut() {
+            if client.last_state.get(state_id) == Some(&payload.to_string()) {
+                continue;
+            }
+            client
+                .last_state
+                .insert(state_id.to_string(), payload.to_string());
             let _ = client.sender.try_send(msg.clone());
         }
     }
     pub async fn send_to(&self, pid: Pid, state_id: &str, payload: &str) {
         let msg = format!("update {} {}\n", state_id, payload);
-        let clients = self.clients.read().await;
-        if let Some(client) = clients.get(&pid) {
+        let mut clients = self.clients.write().await;
+        if let Some(client) = clients.get_mut(&pid) {
+            if client.last_state.get(state_id) == Some(&payload.to_string()) {
+                return;
+            }
+            client
+                .last_state
+                .insert(state_id.to_string(), payload.to_string());
             let _ = client.sender.try_send(msg);
         }
     }
 
     pub async fn broadcast_to_cwd(&self, cwd: &Path, state_id: &str, payload: &str) {
         let msg = format!("update {} {}\n", state_id, payload);
-        let clients = self.clients.read().await;
-        for client in clients.values() {
+        let mut clients = self.clients.write().await;
+        for client in clients.values_mut() {
             if client.cwd == cwd {
+                if client.last_state.get(state_id) == Some(&payload.to_string()) {
+                    continue;
+                }
+                client
+                    .last_state
+                    .insert(state_id.to_string(), payload.to_string());
                 let _ = client.sender.try_send(msg.clone());
             }
         }

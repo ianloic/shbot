@@ -39,7 +39,17 @@ and broadcasting state updates back to specific shells.
   determining dirty states or pending commits dynamically when a client
   navigates into an active tree or when the `watcher` detects modifications.
 
-## 2. Zsh Integration (`zsh/`)
+## 2. Bootstrapping and Daemon Start-Up Process
+
+The integration heavily relies on instantaneous connection bootstrapping without requiring polling loops or external supervisors. The start-up sequence operates using a precise `fork()` mechanism:
+
+1. **Shell Check:** When the Zsh plugin starts, it uses the native `zsocket` command to immediately test the socket file (`~/.local/state/shbot/<HOST>.socket`). If the socket responds, connection completes instantly.
+2. **Foreground Launcher (`shbot connect`):** If no daemon is listening, the shell synchronously runs `shbot connect`.
+3. **Early Bind and Validation:** The `connect` launcher instantly drops any stale socket left over from a previous crash and securely binds to the new `UnixListener` *in the foreground process*.
+4. **Daemonize Double-Fork:** The launcher then uses the `daemonize` crate to safely double-fork into the background and isolate the process. Because this is purely an OS-level `fork()` (without `exec()`), the background process perfectly inherits the active file descriptor of the bound `UnixListener`.
+5. **Instant Guarantee:** The parent launcher safely terminates knowing the socket is completely operational. When control is returned to Zsh, the shell plugin verifies the new socket instantly with a zero-delay `zsocket` success.
+
+## 3. Zsh Integration (`zsh/`)
 
 The shell plugin (`shbot.plugin.zsh`) avoids the slowness of traditional
 synchronous prompts (like checking Git status before drawing `$PS1`) by
@@ -62,7 +72,7 @@ connecting to the `shbot` daemon in the background.
   - `zshexit`: Properly cleans up file descriptors and the socket stream when
     the shell exits.
 
-## 3. Integration Tests (`integration-tests/`)
+## 4. Integration Tests (`integration-tests/`)
 
 Because the Zsh plugin relies heavily on ZLE (`zle -F`), simple script execution
 (like testing a standalone bash script) wouldn't correctly simulate the
@@ -82,7 +92,7 @@ interactive prompt environment.
   `echo $SHBOT_STATE`) to verify that the internal shell state matched the
   server payload correctly.
 
-## 4. Client/Server Protocol
+## 5. Client/Server Protocol
 
 The communication between the Zsh clients and the central Rust daemon utilizes
 newline-delimited text over UNIX domain sockets. Using a simple text protocol

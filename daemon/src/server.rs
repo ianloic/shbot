@@ -17,12 +17,15 @@ pub async fn run_server(
     config_tx: tokio::sync::watch::Sender<Config>,
     watcher: Arc<SyncWatcher>,
     socket_path: PathBuf,
+    pre_bound_listener: Option<std::os::unix::net::UnixListener>,
 ) -> Result<()> {
     let mut listenfd = ListenFd::from_env();
 
-    // Check if systemd passed us a listener
-    let listener = if let Some(std_listener) = listenfd.take_unix_listener(0)? {
-        info!("Using systemd socket activation");
+    // Check if we received a pre-bound listener from the parent or systemd
+    let listener = if let Some(std_listener) =
+        pre_bound_listener.or_else(|| listenfd.take_unix_listener(0).unwrap_or(None))
+    {
+        info!("Using inherited or systemd socket activation");
         std_listener.set_nonblocking(true)?;
         UnixListener::from_std(std_listener)?
     } else {

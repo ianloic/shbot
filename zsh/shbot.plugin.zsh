@@ -21,7 +21,7 @@ function _shbot_send() {
 }
 
 function _shbot_connect() {
-	local socket_path="${SHBOT_SOCKET:-$HOME/.local/state/shbot/socket/$HOST.socket}"
+	local socket_path="${SHBOT_SOCKET:-$HOME/.local/state/shbot/$HOST.socket}"
 	_shbot_debug "Connecting to socket: $socket_path"
 
 	if [[ $SHBOT_FD -ne 0 ]]; then
@@ -31,20 +31,19 @@ function _shbot_connect() {
 		SHBOT_FD=0
 	fi
 
-	if [[ ! -S "$socket_path" ]]; then
-		_shbot_debug "Socket not found, starting daemon..."
+	# Optimistically try connecting
+	if ! zsocket "$socket_path" 2>/dev/null; then
+		_shbot_debug "Socket not responding, starting daemon..."
 		command shbot connect || {
 			_shbot_debug "Daemon start failed"
 			return 1
 		}
-		# Give the daemon a moment to boot
-		sleep 0.1
+		zsocket "$socket_path" 2>/dev/null || {
+			_shbot_debug "Failed to connect to $socket_path after start"
+			return 1
+		}
 	fi
 
-	zsocket "$socket_path" 2>/dev/null || {
-		_shbot_debug "Failed to zsocket to $socket_path"
-		return 1
-	}
 	SHBOT_FD=$REPLY
 	_shbot_debug "Connected to socket (FD: $SHBOT_FD)"
 

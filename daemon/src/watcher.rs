@@ -65,13 +65,20 @@ impl SyncWatcher {
                     let unique_cwds = state.get_unique_cwds().await;
                     let config = config_rx.borrow().clone();
                     for cwd in unique_cwds {
-                        if let Ok(Some((_, git_state))) = get_git_state(&cwd) {
-                            state
-                                .broadcast_to_cwd(&cwd, "git", &git_state.to_payload())
-                                .await;
-                        }
+                        // Check if ANY dirty dir is the cwd itself or a subdirectory of it
+                        let affected = to_process
+                            .iter()
+                            .any(|dirty_dir| dirty_dir.starts_with(&cwd));
 
-                        evaluate_file_triggers(&cwd, &state, &config).await;
+                        if affected {
+                            if let Ok(Some((_, git_state))) = get_git_state(&cwd) {
+                                state
+                                    .broadcast_to_cwd(&cwd, "git", &git_state.to_payload())
+                                    .await;
+                            }
+
+                            evaluate_file_triggers(&cwd, &state, &config).await;
+                        }
                     }
                 }
             }
