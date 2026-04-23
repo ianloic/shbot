@@ -46,3 +46,7 @@ find.
   format the entire repository simply run `./scripts/fmt.sh` from the repository
   root. It will automatically download required formatters (`shfmt` and
   `dprint`) if they are not globally installed.
+- **Code Style**: When importing types or functions from within the crate,
+  always pull them into scope via `use` statements. Do not use inline `crate::`
+  paths (e.g., `crate::error::Result`) anywhere in the code except within `use`
+  declarations.

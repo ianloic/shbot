@@ -1,3 +1,4 @@
+use crate::error::Result;
 use git2::{Repository, StatusOptions};
 use std::path::{Path, PathBuf};
 
@@ -27,7 +28,7 @@ impl GitState {
     }
 }
 
-pub fn get_git_state(path: &Path) -> crate::error::Result<Option<(PathBuf, GitState)>> {
+pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
     // Discover repository. It traverses upwards automatically.
     let repo = match Repository::discover(path) {
         Ok(r) => r,

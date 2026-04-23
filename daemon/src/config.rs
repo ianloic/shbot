@@ -1,3 +1,4 @@
+use crate::error::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -44,7 +45,7 @@ pub enum TriggerConfig {
 }
 
 impl Config {
-    pub fn load() -> crate::error::Result<Self> {
+    pub fn load() -> Result<Self> {
         let home = std::env::var("HOME")?;
         let config_path = PathBuf::from(home)
             .join(".config")

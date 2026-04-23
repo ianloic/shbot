@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::error::Result;
 use crate::git::get_git_state;
 use crate::runner::evaluate_file_triggers;
 use crate::state::AppState;
@@ -29,7 +30,7 @@ impl SyncWatcher {
         &self,
         state: Arc<AppState>,
         config_rx: tokio::sync::watch::Receiver<Config>,
-    ) -> crate::error::Result<()> {
+    ) -> Result<()> {
         let dirty_dirs_clone = self.dirty_dirs.clone();
 
         let watcher = RecommendedWatcher::new(
