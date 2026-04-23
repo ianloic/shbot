@@ -126,6 +126,17 @@ impl AppState {
         let clients = self.clients.read().await;
         clients.len()
     }
+
+    pub async fn invalidate(&self, query: &str) {
+        let mut clients = self.clients.write().await;
+        for client in clients.values_mut() {
+            if query == "*" {
+                client.last_state.clear();
+            } else {
+                client.last_state.remove(query);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

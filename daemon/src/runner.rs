@@ -69,7 +69,12 @@ pub fn start_periodic_triggers(
     });
 }
 
-pub async fn evaluate_file_triggers(cwd: &std::path::Path, state: &AppState, config: &Config) {
+pub async fn evaluate_file_triggers(
+    cwd: &std::path::Path,
+    state: &AppState,
+    config: &Config,
+    affected_paths: Option<&[std::path::PathBuf]>,
+) {
     // Only run if the path exists
     if !cwd.exists() {
         return;
@@ -77,33 +82,61 @@ pub async fn evaluate_file_triggers(cwd: &std::path::Path, state: &AppState, con
 
     for (name, trigger) in &config.triggers {
         if let TriggerConfig::FileChange {
-            watch: _watch_pattern,
+            watch: watch_pattern,
             command,
         } = trigger
         {
-            // For now, naive execute in the given CWD
-            let name = name.clone();
-            let command = command.clone();
-            // Actually, we can just broadcast_to_cwd
+            let mut matched = false;
 
-            match Command::new("sh")
-                .arg("-c")
-                .arg(&command)
-                .current_dir(cwd)
-                .output()
-                .await
-            {
-                Ok(output) => {
-                    if output.status.success() {
-                        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                        state.broadcast_to_cwd(cwd, &name, &stdout).await;
-                    } else {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        error!("File trigger '{}' failed: {}", name, stderr);
+            if let Some(paths) = affected_paths {
+                let builder = globset::GlobBuilder::new(watch_pattern);
+                let glob = match builder.build() {
+                    Ok(g) => g.compile_matcher(),
+                    Err(e) => {
+                        error!(
+                            "Invalid glob pattern '{}' for trigger '{}': {}",
+                            watch_pattern, name, e
+                        );
+                        continue;
+                    }
+                };
+
+                for path in paths {
+                    if let Ok(rel_path) = path.strip_prefix(cwd) {
+                        if glob.is_match(rel_path) {
+                            matched = true;
+                            break;
+                        }
                     }
                 }
-                Err(e) => {
-                    error!("File trigger '{}' failed to execute: {}", name, e);
+            } else {
+                // If affected_paths is None, force execution
+                matched = true;
+            }
+
+            if matched {
+                let name = name.clone();
+                let command = command.clone();
+
+                match Command::new("sh")
+                    .arg("-c")
+                    .arg(&command)
+                    .current_dir(cwd)
+                    .output()
+                    .await
+                {
+                    Ok(output) => {
+                        if output.status.success() {
+                            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                            state.broadcast_to_cwd(cwd, &name, &stdout).await;
+                        } else {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            error!("File trigger '{}' failed: {}", name, stderr);
+                        }
+                    }
+                    Err(e) => {
+                        error!("File trigger '{}' failed to execute: {}", name, e);
+                    }
                 }
             }
         }

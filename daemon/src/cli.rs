@@ -22,4 +22,6 @@ pub enum Commands {
     Status,
     /// Reloads the configuration file dynamically
     Reload,
+    /// Sets the daemon's runtime log level
+    Loglevel { level: String },
 }

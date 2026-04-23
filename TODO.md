@@ -5,22 +5,22 @@ required to make `shbot` production-ready.
 
 ## 1. Packaging and Systemd Integration
 
-- [ ] Create `shbot.service` and `shbot.socket` configuration files for systemd
+- [x] Create `shbot.service` and `shbot.socket` configuration files for systemd
       user service deployment leveraging `listenfd`.
-- [ ] Create an `install.sh` script or `Makefile` to automatically build
+- [x] Create an `install.sh` script or `Makefile` to automatically build
       `shbot`, install the binaries to `~/.local/bin`, and configure `~/.zshrc`.
 
 ## 2. Advanced "File-Change" Trigger Patterns
 
-- [ ] Update the `evalute_file_triggers` engine to support standard glob
+- [x] Update the `evalute_file_triggers` engine to support standard glob
       patterns (e.g. `**/*.rs` or `src/*.js`) instead of relying solely on exact
       absolute/relative paths.
 
 ## 3. Protocol Expansion
 
-- [ ] Fully implement the `invalidate <query>` UNIX socket command to allow
+- [x] Fully implement the `invalidate <query>` UNIX socket command to allow
       power-users to wipe out stale daemon caches for immediate sync debugging.
-- [ ] Add a `shbot` subcommand to configure the daemon's log level dynamically
+- [x] Add a `shbot` subcommand to configure the daemon's log level dynamically
       while it's running. This requires adding a new UNIX socket protocol
       command.
 
@@ -39,3 +39,28 @@ required to make `shbot` production-ready.
 - [x] **Update loop spam**: `shbot` spams the same state update repititively. It
       shouldn't send identical state updates over and over again, and it
       shouldn't re-scan the git repo unless something actually changes.
+
+## 6. Test Coverage Improvements
+
+The project currently lacks granular test coverage. The following specific
+sections of code and functionality need unit/integration tests to ensure
+stability:
+
+- [ ] **`daemon/src/git.rs`**: Unit tests for parsing the
+      `git status --porcelain` output, especially handling unusual states (e.g.
+      detached HEAD, complex staged/unstaged combinations, merge conflicts, and
+      uninitialized repos).
+- [ ] **`daemon/src/server.rs`**: Protocol parsing tests to verify `cd`,
+      `hello`, `invalidate <query>`, and log-level configuration commands are
+      correctly interpreted from socket streams.
+- [ ] **`daemon/src/runner.rs`**: Unit tests for `evaluate_file_triggers` to
+      ensure glob patterns (e.g. `**/*.rs`) match properly and avoid false
+      positives/negatives when checking modified files.
+- [ ] **`daemon/src/state.rs`**: Caching tests to verify diffing functionality
+      accurately prevents redundant identical state updates from being spammed
+      to clients.
+- [ ] **`daemon/src/config.rs`**: Unit tests validating configuration file
+      loading and fallback behaviors.
+- [ ] **Zsh Plugin / System Daemon recovery**: Expand `integration-tests` to
+      simulate crash recovery (e.g. stale `.pid` and `.socket` cleanup
+      capability) and robust reconnection logic without panicking.

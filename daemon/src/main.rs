@@ -14,8 +14,7 @@ use daemonize::Daemonize;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use tracing::{Level, error, info};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{error, info};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -39,6 +38,11 @@ fn main() -> Result<()> {
         Commands::Reload => {
             if let Err(e) = handle_reload() {
                 eprintln!("Failed to reload: {}", e);
+            }
+        }
+        Commands::Loglevel { level } => {
+            if let Err(e) = handle_loglevel(&level) {
+                eprintln!("Failed to set log level: {}", e);
             }
         }
     }
@@ -78,6 +82,26 @@ fn handle_reload() -> Result<()> {
 
     let mut stream = UnixStream::connect(&socket_path)?;
     stream.write_all(b"reload\n")?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+
+    println!("{}", response.trim());
+    Ok(())
+}
+
+fn handle_loglevel(level: &str) -> Result<()> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let socket_path = get_socket_path()?;
+    if !socket_path.exists() {
+        println!("Daemon is not running (socket empty).");
+        return Ok(());
+    }
+
+    let mut stream = UnixStream::connect(&socket_path)?;
+    stream.write_all(format!("loglevel {}\n", level).as_bytes())?;
 
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
@@ -146,24 +170,32 @@ fn handle_daemon(pre_bound_listener: Option<std::os::unix::net::UnixListener>) -
 }
 
 fn setup_logging(log_file: Option<&Path>) -> Result<()> {
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, fmt, reload};
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .with_env_filter(env_filter);
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let (filter_layer, reload_handle) = reload::Layer::new(env_filter);
 
+    let format_layer = fmt::layer();
     if let Some(path) = log_file {
         if let Some(p) = path.parent() {
             std::fs::create_dir_all(p)?;
         }
         let file = File::create(path)?;
-        let subscriber = subscriber.with_writer(file).finish();
-        tracing::subscriber::set_global_default(subscriber)?;
+        tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(format_layer.with_writer(file))
+            .init();
     } else {
-        let subscriber = subscriber.finish();
-        tracing::subscriber::set_global_default(subscriber)?;
+        tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(format_layer)
+            .init();
     }
+
+    // Store reload handle for dynamic updates
+    let _ = crate::server::LOG_RELOAD_HANDLE.set(reload_handle);
 
     Ok(())
 }

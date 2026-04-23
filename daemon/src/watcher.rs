@@ -14,14 +14,14 @@ use std::sync::Mutex as StdMutex;
 use tracing::{info, warn};
 
 pub struct SyncWatcher {
-    dirty_dirs: Arc<Mutex<HashSet<PathBuf>>>,
+    dirty_paths: Arc<Mutex<HashSet<PathBuf>>>,
     watcher: StdMutex<Option<RecommendedWatcher>>,
 }
 
 impl SyncWatcher {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            dirty_dirs: Arc::new(Mutex::new(HashSet::new())),
+            dirty_paths: Arc::new(Mutex::new(HashSet::new())),
             watcher: StdMutex::new(None),
         })
     }
@@ -31,16 +31,14 @@ impl SyncWatcher {
         state: Arc<AppState>,
         config_rx: tokio::sync::watch::Receiver<Config>,
     ) -> Result<()> {
-        let dirty_dirs_clone = self.dirty_dirs.clone();
+        let dirty_paths_clone = self.dirty_paths.clone();
 
         let watcher = RecommendedWatcher::new(
             move |res: notify::Result<Event>| {
                 if let Ok(event) = res {
-                    let mut dirty = dirty_dirs_clone.blocking_lock();
+                    let mut dirty = dirty_paths_clone.blocking_lock();
                     for path in event.paths {
-                        if let Some(parent) = path.parent() {
-                            dirty.insert(parent.to_path_buf());
-                        }
+                        dirty.insert(path);
                     }
                 }
             },
@@ -49,13 +47,13 @@ impl SyncWatcher {
 
         *self.watcher.lock().unwrap() = Some(watcher);
 
-        let dirty_dirs = self.dirty_dirs.clone();
+        let dirty_paths = self.dirty_paths.clone();
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_millis(150)).await;
                 let mut to_process = Vec::new();
                 {
-                    let mut dirty = dirty_dirs.lock().await;
+                    let mut dirty = dirty_paths.lock().await;
                     if !dirty.is_empty() {
                         to_process = dirty.drain().collect();
                     }
@@ -65,19 +63,22 @@ impl SyncWatcher {
                     let unique_cwds = state.get_unique_cwds().await;
                     let config = config_rx.borrow().clone();
                     for cwd in unique_cwds {
-                        // Check if ANY dirty dir is the cwd itself or a subdirectory of it
-                        let affected = to_process
+                        // Check if ANY dirty path is the cwd itself or a subdirectory of it
+                        let affected_paths: Vec<PathBuf> = to_process
                             .iter()
-                            .any(|dirty_dir| dirty_dir.starts_with(&cwd));
+                            .filter(|dirty_path| dirty_path.starts_with(&cwd))
+                            .cloned()
+                            .collect();
 
-                        if affected {
+                        if !affected_paths.is_empty() {
                             if let Ok(Some((_, git_state))) = get_git_state(&cwd) {
                                 state
                                     .broadcast_to_cwd(&cwd, "git", &git_state.to_payload())
                                     .await;
                             }
 
-                            evaluate_file_triggers(&cwd, &state, &config).await;
+                            evaluate_file_triggers(&cwd, &state, &config, Some(&affected_paths))
+                                .await;
                         }
                     }
                 }

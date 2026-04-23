@@ -1,0 +1,15 @@
+[Unit]
+Description=shbot Zsh state daemon service
+Requires=shbot.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/shbot daemon
+Restart=on-failure
+RestartSec=5
+# Output will go to journald automatically
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

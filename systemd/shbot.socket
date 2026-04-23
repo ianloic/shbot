@@ -1,0 +1,9 @@
+[Unit]
+Description=shbot Zsh state daemon socket
+
+[Socket]
+ListenStream=%h/.local/state/shbot/%H.socket
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target

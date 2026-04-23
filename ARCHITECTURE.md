@@ -17,8 +17,9 @@ and broadcasting state updates back to specific shells.
 
 - **`main.rs` & `cli.rs`:** Handles argument parsing using `clap`. Supports
   commands like `daemon` (to start the background process using double-fork
-  isolation via `daemonize`), `connect` (for shells to initially bootstrap), and
-  `status` (for troubleshooting).
+  isolation via `daemonize` if not socket-activated), `connect` (for shells to
+  initially bootstrap), `status` (for troubleshooting), `reload` (for dynamic
+  config reload) and `loglevel` (for dynamic log filtering).
 - **`server.rs`:** Manages the UNIX socket listener
   (`~/.local/state/shbot/socket/<HOSTNAME>.socket`). It accepts incoming shell
   connections, registers them, and handles incoming commands (like `cd`) to
@@ -41,13 +42,30 @@ and broadcasting state updates back to specific shells.
 
 ## 2. Bootstrapping and Daemon Start-Up Process
 
-The integration heavily relies on instantaneous connection bootstrapping without requiring polling loops or external supervisors. The start-up sequence operates using a precise `fork()` mechanism:
+The integration heavily relies on instantaneous connection bootstrapping without
+requiring polling loops or external supervisors. The start-up sequence operates
+using `systemd` socket activation or a built-in `fork()` fallback mechanism:
 
-1. **Shell Check:** When the Zsh plugin starts, it uses the native `zsocket` command to immediately test the socket file (`~/.local/state/shbot/<HOST>.socket`). If the socket responds, connection completes instantly.
-2. **Foreground Launcher (`shbot connect`):** If no daemon is listening, the shell synchronously runs `shbot connect`.
-3. **Early Bind and Validation:** The `connect` launcher instantly drops any stale socket left over from a previous crash and securely binds to the new `UnixListener` *in the foreground process*.
-4. **Daemonize Double-Fork:** The launcher then uses the `daemonize` crate to safely double-fork into the background and isolate the process. Because this is purely an OS-level `fork()` (without `exec()`), the background process perfectly inherits the active file descriptor of the bound `UnixListener`.
-5. **Instant Guarantee:** The parent launcher safely terminates knowing the socket is completely operational. When control is returned to Zsh, the shell plugin verifies the new socket instantly with a zero-delay `zsocket` success.
+1. **Systemd Socket Activation:** By default, the `install.sh` configures
+   systemd user services (`shbot.socket` and `shbot.service`). When `shbot` (or
+   Zsh) tries to communicate with the socket, systemd automatically spawns the
+   daemon and passes the active `UnixListener` via the `ListenFd` crate.
+2. **Shell Check:** When the Zsh plugin starts, it uses the native `zsocket`
+   command to immediately test the socket file
+   (`~/.local/state/shbot/<HOST>.socket`). If the socket responds, connection
+   completes instantly.
+3. **Foreground Launcher (`shbot connect`):** If no daemon is listening (and
+   systemd is unavailable), the shell synchronously runs `shbot connect`.
+4. **Early Bind and Validation:** The `connect` launcher instantly drops any
+   stale socket left over from a previous crash and securely binds to the new
+   `UnixListener` _in the foreground process_.
+5. **Daemonize Double-Fork:** The launcher then uses the `daemonize` crate to
+   safely double-fork into the background and isolate the process. Because this
+   is purely an OS-level `fork()` (without `exec()`), the background process
+   perfectly inherits the active file descriptor of the bound `UnixListener`.
+6. **Instant Guarantee:** The parent launcher safely terminates knowing the
+   socket is completely operational. When control is returned to Zsh, the shell
+   plugin verifies the new socket instantly with a zero-delay `zsocket` success.
 
 ## 3. Zsh Integration (`zsh/`)
 
@@ -109,8 +127,12 @@ manual debugging.
 - `status`: Sent by the `shbot status` CLI command to request a dump of the
   daemon's internal state. The daemon will respond and then immediately close
   the connection.
-- `invalidate <target>`: (Draft) Forces the daemon to discard and re-evaluate
-  cached state.
+- `reload`: Sent by the `shbot reload` CLI command. Forces the daemon to reload
+  its configuration from disk and apply it immediately.
+- `loglevel <level>`: Sent by `shbot loglevel <level>`. Modifies the daemon's
+  running `EnvFilter` without restarting.
+- `invalidate <target>`: Forces the daemon to discard and re-evaluate cached
+  state.
 
 ### Daemon to Client Events:
 

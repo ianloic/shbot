@@ -12,28 +12,34 @@ up-to-date state.
 
 ### 1. Installation
 
-Build the daemon from source using Rust's package manager, Cargo:
+The easiest way to install `shbot` and its systemd user services is to use the
+included installation script:
 
 ```bash
 git clone https://github.com/yourusername/shbot.git
 cd shbot
-cargo build --release
-cp target/release/shbot ~/.local/bin/
+./install.sh
 ```
 
-Ensure `~/.local/bin` is in your `$PATH`.
+This script will seamlessly compile the daemon, copy the binary to
+`~/.local/bin/`, set up `systemd` socket activation, and configure your
+`~/.zshrc`.
 
 ### 2. Shell Setup
 
-Add the bundled Zsh plugin to your `~/.zshrc`:
+### 2. Shell Setup
+
+If you used `./install.sh`, this is already done for you! Otherwise, add the
+bundled Zsh plugin to your `~/.zshrc`:
 
 ```zsh
 # Source the shbot plugin
 source /path/to/shbot/zsh/shbot.plugin.zsh
 ```
 
-Upon creating a new shell, `shbot` will automatically start the background
-daemon, open a Unix domain socket, and connect your shell.
+Upon launching a new shell, `shbot` will automatically start the background
+daemon (if it isn't socket-activated via systemd already) and instantly connect
+your shell.
 
 ### 3. Minimal Configuration (Optional)
 
@@ -52,10 +58,10 @@ type = "periodic"
 interval_sec = 60
 command = "echo 'Hello World'"
 
-# A task that runs whenever files in `src` change
+# A task that runs whenever files in `src` change (supports glob patterns)
 [triggers.my_watcher]
 type = "file-change"
-watch = "src"
+watch = "src/**/*.rs"
 command = "cargo check"
 ```
 
@@ -85,8 +91,8 @@ Types of triggers:
   - `command`: Shell command to execute. Output will be piped to Zsh.
 - **File Change**:
   - `type`: `"file-change"`
-  - `watch`: The path to monitor for changes (relative to the shell's Current
-    Working Directory).
+  - `watch`: A glob pattern of the paths to monitor for changes (relative to the
+    shell's Current Working Directory), e.g., `"src/**/*.rs"`.
   - `command`: Shell command to execute on change.
 - **Explicit**:
   - `type`: `"explicit"`
@@ -94,7 +100,25 @@ Types of triggers:
 
 > **Hot Reloading:** `shbot` dynamically hot-reloads its configuration when the
 > TOML file changes, instantly terminating or applying new trigger intervals
-> without needing to restart active shells.
+> without needing to restart active shells. You can also manually trigger a
+> reload by running `shbot reload`.
+
+---
+
+## CLI Commands
+
+While `shbot` runs primarily in the background, it provides a CLI for
+interaction:
+
+- `shbot connect`: Bootstraps the daemon (spawns it in the background if not
+  running).
+- `shbot daemon`: Runs the long-lived daemon server directly in the foreground.
+- `shbot status`: Requests the current internal state (e.g. number of connected
+  clients) from the running daemon.
+- `shbot reload`: Forces the daemon to reload its configuration file
+  dynamically.
+- `shbot loglevel <level>`: Dynamically sets the daemon's runtime log filter
+  (e.g., `shbot loglevel debug`) without restarting.
 
 ---
 

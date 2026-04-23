@@ -10,6 +10,10 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{error, info, warn};
+use tracing_subscriber::{EnvFilter, Registry, reload::Handle};
+
+pub static LOG_RELOAD_HANDLE: std::sync::OnceLock<Handle<EnvFilter, Registry>> =
+    std::sync::OnceLock::new();
 
 pub async fn run_server(
     state: Arc<AppState>,
@@ -139,7 +143,7 @@ async fn handle_connection(
                         state.send_to(pid, "git", "").await;
                     }
                     let config = config_rx.borrow().clone();
-                    evaluate_file_triggers(&path, &state, &config).await;
+                    evaluate_file_triggers(&path, &state, &config, None).await;
                 } else {
                     warn!("Received cd before hello");
                 }
@@ -168,7 +172,36 @@ async fn handle_connection(
             }
             "invalidate" => {
                 info!("Invalidate request for: {}", arg);
-                // Handle manual invalidate
+                state.invalidate(arg).await;
+            }
+            "loglevel" => {
+                if let Some(handle) = LOG_RELOAD_HANDLE.get() {
+                    match EnvFilter::try_new(arg) {
+                        Ok(new_filter) => {
+                            if let Err(e) = handle.modify(|filter| *filter = new_filter) {
+                                error!("Failed to update log level: {}", e);
+                                let _ = tx.try_send(format!(
+                                    "error: failed to update log level - {}\n",
+                                    e
+                                ));
+                            } else {
+                                info!("Log level dynamically updated to: {}", arg);
+                                let _ = tx.try_send(
+                                    "status: log level updated successfully\n".to_string(),
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Invalid log level provided: {}", arg);
+                            let _ = tx
+                                .try_send(format!("error: invalid log level '{}' - {}\n", arg, e));
+                        }
+                    }
+                } else {
+                    let _ = tx.try_send("error: log reload handle not initialized\n".to_string());
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                break;
             }
             "status" => {
                 // Send a status dump to this unique connection, then close
