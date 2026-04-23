@@ -7,7 +7,7 @@ mod server;
 mod state;
 mod watcher;
 
-use crate::error::{Result, ShbotError};
+use crate::error::Result;
 use clap::Parser;
 use cli::{Cli, Commands};
 use daemonize::Daemonize;

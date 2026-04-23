@@ -7,7 +7,6 @@ pub type Pid = u32;
 
 #[derive(Debug)]
 pub struct ClientInfo {
-    pub pid: Pid,
     pub cwd: PathBuf,
     pub sender: mpsc::Sender<String>,
     pub last_state: HashMap<String, String>,
@@ -29,7 +28,6 @@ impl AppState {
         clients.insert(
             pid,
             ClientInfo {
-                pid,
                 cwd,
                 sender,
                 last_state: HashMap::new(),
