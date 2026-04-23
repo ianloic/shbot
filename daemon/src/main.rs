@@ -145,9 +145,12 @@ fn handle_daemon() -> Result<()> {
 }
 
 fn setup_logging(log_file: Option<&Path>) -> Result<()> {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env());
+        .with_env_filter(env_filter);
 
     if let Some(path) = log_file {
         if let Some(p) = path.parent() {
@@ -206,7 +209,13 @@ pub fn get_socket_path() -> Result<PathBuf> {
     // We can use std::env::var("HOME").unwrap() + "/.local/state/shbot/socket/..."
 
     let home = std::env::var("HOME").expect("HOME env var not set");
-    let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
+    let host = std::env::var("HOST")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| {
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "localhost".to_string())
+        });
 
     let path = PathBuf::from(home)
         .join(".local")
