@@ -34,7 +34,8 @@ function _shbot_connect() {
 	# Optimistically try connecting
 	if ! zsocket "$socket_path" 2>/dev/null; then
 		_shbot_debug "Socket not responding, starting daemon..."
-		command shbot connect || {
+		local shbot_cmd="${SHBOT_BIN:-shbot}"
+		command $shbot_cmd connect || {
 			_shbot_debug "Daemon start failed"
 			return 1
 		}
