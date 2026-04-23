@@ -5,7 +5,7 @@ mod tests {
     
     // Quick test to ensure that the Zsh plugin sources correctly and spawns the shbot binary
     #[test]
-    fn test_zsh_plugin_bootstrap() -> anyhow::Result<()> {
+    fn test_zsh_plugin_bootstrap() -> Result<(), Box<dyn std::error::Error>> {
         // We set up a fake shbot bin in path and test whether connection triggers.
         // For right now, we can just test if the plugin loads.
         

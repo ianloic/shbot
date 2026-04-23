@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod error;
 mod git;
 mod runner;
 mod server;
@@ -15,7 +16,7 @@ use std::path::{Path, PathBuf};
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
-fn main() -> anyhow::Result<()> {
+fn main() -> crate::error::Result<()> {
     let cli = Cli::parse();
 
     // Setup logging
@@ -44,7 +45,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_status() -> anyhow::Result<()> {
+fn handle_status() -> crate::error::Result<()> {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
@@ -64,7 +65,7 @@ fn handle_status() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_reload() -> anyhow::Result<()> {
+fn handle_reload() -> crate::error::Result<()> {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
@@ -84,7 +85,7 @@ fn handle_reload() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_daemon() -> anyhow::Result<()> {
+fn handle_daemon() -> crate::error::Result<()> {
     // Load config
     let config = config::Config::load()?;
     let socket_path = get_socket_path()?;
@@ -142,7 +143,7 @@ fn handle_daemon() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn setup_logging(log_file: Option<&Path>) -> anyhow::Result<()> {
+fn setup_logging(log_file: Option<&Path>) -> crate::error::Result<()> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env());
@@ -162,7 +163,7 @@ fn setup_logging(log_file: Option<&Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_connect() -> anyhow::Result<()> {
+fn handle_connect() -> crate::error::Result<()> {
     let state_dir = get_socket_path()?.parent().unwrap().to_path_buf();
     std::fs::create_dir_all(&state_dir)?;
 
@@ -195,9 +196,10 @@ fn handle_connect() -> anyhow::Result<()> {
 }
 
 // Socket path convention: ~/.local/state/shbot/socket/$HOST.socket
-pub fn get_socket_path() -> anyhow::Result<PathBuf> {
-    let base_dirs = directories::ProjectDirs::from("", "", "shbot")
-        .ok_or_else(|| anyhow::anyhow!("Could not find valid home directory"))?;
+pub fn get_socket_path() -> crate::error::Result<PathBuf> {
+    let base_dirs = directories::ProjectDirs::from("", "", "shbot").ok_or_else(|| {
+        crate::error::ShbotError::Custom("Could not find valid home directory".into())
+    })?;
 
     let _state_dir = base_dirs.data_local_dir(); // Usually ~/.local/share/shbot
     // But spec explicitly says ~/.local/state/shbot/socket/${HOSTNAME}.socket

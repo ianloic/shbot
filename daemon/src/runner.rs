@@ -114,9 +114,6 @@ pub async fn evaluate_file_triggers(cwd: &std::path::Path, state: &AppState, con
 mod tests {
     use super::*;
     use crate::config::{Config, TriggerConfig};
-    use crate::state::AppState;
-    use std::collections::HashMap;
-    use std::sync::Arc;
     use tokio::sync::watch;
 
     #[tokio::test]

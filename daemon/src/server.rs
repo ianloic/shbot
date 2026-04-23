@@ -3,7 +3,6 @@ use crate::git::get_git_state;
 use crate::runner::evaluate_file_triggers;
 use crate::state::{AppState, Pid};
 use crate::watcher::SyncWatcher;
-use anyhow::Result;
 use listenfd::ListenFd;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,7 +16,7 @@ pub async fn run_server(
     config_tx: tokio::sync::watch::Sender<Config>,
     watcher: Arc<SyncWatcher>,
     socket_path: PathBuf,
-) -> Result<()> {
+) -> crate::error::Result<()> {
     let mut listenfd = ListenFd::from_env();
 
     // Check if systemd passed us a listener
@@ -71,7 +70,7 @@ async fn handle_connection(
     config_rx: tokio::sync::watch::Receiver<Config>,
     config_tx: tokio::sync::watch::Sender<Config>,
     watcher: Arc<SyncWatcher>,
-) -> Result<()> {
+) -> crate::error::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();

@@ -29,7 +29,7 @@ impl SyncWatcher {
         &self,
         state: Arc<AppState>,
         config_rx: tokio::sync::watch::Receiver<Config>,
-    ) -> anyhow::Result<()> {
+    ) -> crate::error::Result<()> {
         let dirty_dirs_clone = self.dirty_dirs.clone();
 
         let watcher = RecommendedWatcher::new(

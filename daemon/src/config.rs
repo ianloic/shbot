@@ -44,7 +44,7 @@ pub enum TriggerConfig {
 }
 
 impl Config {
-    pub fn load() -> anyhow::Result<Self> {
+    pub fn load() -> crate::error::Result<Self> {
         let home = std::env::var("HOME")?;
         let config_path = PathBuf::from(home)
             .join(".config")
