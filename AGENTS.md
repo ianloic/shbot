@@ -23,6 +23,11 @@ communicates over the socket, or change the lifecycle hooks in the Zsh plugin,
 please ensure those changes are accurately reflected in `ARCHITECTURE.md` as
 part of your commit.
 
+Similarly, **you are strictly required to keep `README.md` up to date.** As the
+software evolves—whether through new user-facing features, configuration file
+options, installation steps, or Zsh API capabilities—the `README.md` must always
+reflect the current functionality.
+
 Additionally, the project backlog is maintained in `TODO.md` in the root of the
 repository. **As you complete items from the backlog or discover new
 improvements that need to be made, you must keep `TODO.md` up to date.** Mark
