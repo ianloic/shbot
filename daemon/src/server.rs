@@ -130,10 +130,41 @@ async fn handle_connection(
                     let path = PathBuf::from(arg);
                     state.update_cwd(pid, path.clone()).await;
 
-                    watcher.watch(&path);
+                    let watch_target = if let Ok(Some((root, _))) = get_git_state(&path) {
+                        PathBuf::from(root)
+                    } else {
+                        path.clone()
+                    };
+                    watcher.watch(&watch_target);
+
                     if let Some(old) = old_cwd {
-                        if old != path && !state.is_cwd_active(&old).await {
-                            watcher.unwatch(&old);
+                        if old != path {
+                            let old_watch_target = if let Ok(Some((root, _))) = get_git_state(&old)
+                            {
+                                PathBuf::from(root)
+                            } else {
+                                old.clone()
+                            };
+
+                            if old_watch_target != watch_target {
+                                let active_cwds = state.get_unique_cwds().await;
+                                let mut keep = false;
+                                for active in active_cwds {
+                                    let active_watch =
+                                        if let Ok(Some((root, _))) = get_git_state(&active) {
+                                            PathBuf::from(root)
+                                        } else {
+                                            active.clone()
+                                        };
+                                    if active_watch == old_watch_target {
+                                        keep = true;
+                                        break;
+                                    }
+                                }
+                                if !keep {
+                                    watcher.unwatch(&old_watch_target);
+                                }
+                            }
                         }
                     }
 
@@ -224,8 +255,27 @@ async fn handle_connection(
         let old_cwd = state.get_cwd(pid).await;
         state.remove_client(pid).await;
         if let Some(old) = old_cwd {
-            if !state.is_cwd_active(&old).await {
-                watcher.unwatch(&old);
+            let old_watch_target = if let Ok(Some((root, _))) = get_git_state(&old) {
+                PathBuf::from(root)
+            } else {
+                old.clone()
+            };
+
+            let active_cwds = state.get_unique_cwds().await;
+            let mut keep = false;
+            for active in active_cwds {
+                let active_watch = if let Ok(Some((root, _))) = get_git_state(&active) {
+                    PathBuf::from(root)
+                } else {
+                    active.clone()
+                };
+                if active_watch == old_watch_target {
+                    keep = true;
+                    break;
+                }
+            }
+            if !keep {
+                watcher.unwatch(&old_watch_target);
             }
         }
     }

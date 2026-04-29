@@ -15,12 +15,14 @@ use tracing::{info, warn};
 
 pub struct SyncWatcher {
     watcher: StdMutex<Option<RecommendedWatcher>>,
+    watched_paths: StdMutex<HashSet<PathBuf>>,
 }
 
 impl SyncWatcher {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             watcher: StdMutex::new(None),
+            watched_paths: StdMutex::new(HashSet::new()),
         })
     }
 
@@ -65,10 +67,22 @@ impl SyncWatcher {
                 let unique_cwds = state.get_unique_cwds().await;
                 let config = config_rx.borrow().clone();
                 for cwd in unique_cwds {
-                    // Check if ANY dirty path is the cwd itself or a subdirectory of it
+                    let git_root = if let Ok(Some((root, _))) = get_git_state(&cwd) {
+                        Some(PathBuf::from(root))
+                    } else {
+                        None
+                    };
+
+                    // Check if ANY dirty path is the cwd itself or a subdirectory of it,
+                    // or within the git_root (if applicable)
                     let affected_paths: Vec<PathBuf> = to_process
                         .iter()
-                        .filter(|dirty_path| dirty_path.starts_with(&cwd))
+                        .filter(|dirty_path| {
+                            dirty_path.starts_with(&cwd)
+                                || git_root
+                                    .as_ref()
+                                    .map_or(false, |r| dirty_path.starts_with(r))
+                        })
                         .cloned()
                         .collect();
 
@@ -92,10 +106,17 @@ impl SyncWatcher {
         if path.as_os_str().is_empty() {
             return;
         }
+
+        let mut paths = self.watched_paths.lock().unwrap();
+        if paths.contains(path) {
+            return;
+        }
+
         if let Some(w) = self.watcher.lock().unwrap().as_mut() {
             if let Err(e) = w.watch(path, notify::RecursiveMode::Recursive) {
                 warn!("Failed to watch {:?}: {}", path, e);
             } else {
+                paths.insert(path.to_path_buf());
                 info!("Watching path: {:?}", path);
             }
         }
@@ -105,6 +126,12 @@ impl SyncWatcher {
         if path.as_os_str().is_empty() {
             return;
         }
+
+        let mut paths = self.watched_paths.lock().unwrap();
+        if !paths.contains(path) {
+            return;
+        }
+
         if let Some(w) = self.watcher.lock().unwrap().as_mut() {
             if let Err(e) = w.unwatch(path) {
                 // Ignore completely unwatched/not found errors safely without failing
@@ -113,6 +140,7 @@ impl SyncWatcher {
                     warn!("Failed to unwatch {:?}: {}", path, e);
                 }
             } else {
+                paths.remove(path);
                 info!("Unwatching path: {:?}", path);
             }
         }
