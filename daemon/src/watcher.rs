@@ -64,6 +64,11 @@ impl SyncWatcher {
                     to_process.insert(path);
                 }
 
+                tracing::debug!(
+                    "Watcher awoken, processing {} file events",
+                    to_process.len()
+                );
+
                 let unique_cwds = state.get_unique_cwds().await;
                 let config = config_rx.borrow().clone();
                 for cwd in unique_cwds {
@@ -78,15 +83,30 @@ impl SyncWatcher {
                     let affected_paths: Vec<PathBuf> = to_process
                         .iter()
                         .filter(|dirty_path| {
-                            dirty_path.starts_with(&cwd)
-                                || git_root
-                                    .as_ref()
-                                    .map_or(false, |r| dirty_path.starts_with(r))
+                            let match_cwd = dirty_path.starts_with(&cwd);
+                            let match_git = git_root
+                                .as_ref()
+                                .map_or(false, |r| dirty_path.starts_with(r));
+                            if match_cwd || match_git {
+                                tracing::trace!(
+                                    "Event path {:?} matched cwd or git root {:?}",
+                                    dirty_path,
+                                    cwd
+                                );
+                                true
+                            } else {
+                                false
+                            }
                         })
                         .cloned()
                         .collect();
 
                     if !affected_paths.is_empty() {
+                        tracing::debug!(
+                            "Triggering get_git_state for {:?} due to {} affected paths",
+                            cwd,
+                            affected_paths.len()
+                        );
                         if let Ok(Some((_, git_state))) = get_git_state(&cwd) {
                             state
                                 .broadcast_to_cwd(&cwd, "git", &git_state.to_payload())

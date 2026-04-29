@@ -69,6 +69,7 @@ impl GitState {
 }
 
 pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
+    tracing::debug!("Evaluating git state for path: {:?}", path);
     // Discover repository. It traverses upwards automatically.
     let mut repo = match Repository::discover(path) {
         Ok(r) => r,

@@ -135,6 +135,11 @@ async fn handle_connection(
                     } else {
                         path.clone()
                     };
+                    tracing::debug!(
+                        "Handling cd to {:?}, evaluating watch target: {:?}",
+                        path,
+                        watch_target
+                    );
                     watcher.watch(&watch_target);
 
                     if let Some(old) = old_cwd {
@@ -162,7 +167,16 @@ async fn handle_connection(
                                     }
                                 }
                                 if !keep {
+                                    tracing::debug!(
+                                        "Unwatching target {:?} as no active cwds use it",
+                                        old_watch_target
+                                    );
                                     watcher.unwatch(&old_watch_target);
+                                } else {
+                                    tracing::debug!(
+                                        "Keeping watch on target {:?} as it is still used by another active cwd",
+                                        old_watch_target
+                                    );
                                 }
                             }
                         }
@@ -275,7 +289,18 @@ async fn handle_connection(
                 }
             }
             if !keep {
+                tracing::debug!(
+                    "Client {} disconnected, unwatching target {:?} as no other clients need it",
+                    pid,
+                    old_watch_target
+                );
                 watcher.unwatch(&old_watch_target);
+            } else {
+                tracing::debug!(
+                    "Client {} disconnected, keeping watch on target {:?} as it is still used by another active cwd",
+                    pid,
+                    old_watch_target
+                );
             }
         }
     }
