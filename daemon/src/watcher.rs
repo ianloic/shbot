@@ -36,6 +36,11 @@ impl SyncWatcher {
         let watcher = RecommendedWatcher::new(
             move |res: notify::Result<Event>| {
                 if let Ok(event) = res {
+                    // Ignore file read access to prevent infinite loops where
+                    // reading the git status triggers a notify event.
+                    if matches!(event.kind, notify::EventKind::Access(_)) {
+                        return;
+                    }
                     for path in event.paths {
                         let _ = tx.send(path);
                     }
@@ -64,9 +69,11 @@ impl SyncWatcher {
                     to_process.insert(path);
                 }
 
+                let sample_paths: Vec<_> = to_process.iter().take(5).collect();
                 tracing::debug!(
-                    "Watcher awoken, processing {} file events",
-                    to_process.len()
+                    "Watcher awoken, processing {} file events. Sample paths: {:?}",
+                    to_process.len(),
+                    sample_paths
                 );
 
                 let unique_cwds = state.get_unique_cwds().await;

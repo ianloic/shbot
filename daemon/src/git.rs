@@ -185,7 +185,8 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
     opts.include_untracked(true)
         .recurse_untracked_dirs(true)
         .renames_head_to_index(true)
-        .include_ignored(false);
+        .include_ignored(false)
+        .update_index(false);
 
     if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
         for entry in statuses.iter() {
