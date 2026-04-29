@@ -11,6 +11,64 @@ function _shbot_debug() {
 	fi
 }
 
+function _shbot_update_vcs_status() {
+	_shbot_debug "Updating VCS status: $1"
+	local payload="$1"
+	if [[ -z "$payload" ]]; then
+		unset VCS_STATUS_{WORKDIR,COMMIT,LOCAL_BRANCH,REMOTE_BRANCH,REMOTE_NAME,REMOTE_URL,ACTION,INDEX_SIZE,NUM_STAGED,NUM_UNSTAGED,NUM_CONFLICTED,NUM_UNTRACKED,HAS_STAGED,HAS_UNSTAGED,HAS_CONFLICTED,HAS_UNTRACKED,COMMITS_AHEAD,COMMITS_BEHIND,STASHES,TAG,NUM_UNSTAGED_DELETED,NUM_STAGED_NEW,NUM_STAGED_DELETED,PUSH_REMOTE_NAME,PUSH_REMOTE_URL,PUSH_COMMITS_AHEAD,PUSH_COMMITS_BEHIND,NUM_SKIP_WORKTREE,NUM_ASSUME_UNCHANGED,COMMIT_ENCODING,COMMIT_SUMMARY}
+		return 0
+	fi
+
+	local sep=$'\x1f'
+	local -a resp
+	eval "resp=(\"\${(@s.$sep.)payload}\")"
+
+	if [[ -z "${resp[1]}" ]]; then
+		unset VCS_STATUS_{WORKDIR,COMMIT,LOCAL_BRANCH,REMOTE_BRANCH,REMOTE_NAME,REMOTE_URL,ACTION,INDEX_SIZE,NUM_STAGED,NUM_UNSTAGED,NUM_CONFLICTED,NUM_UNTRACKED,HAS_STAGED,HAS_UNSTAGED,HAS_CONFLICTED,HAS_UNTRACKED,COMMITS_AHEAD,COMMITS_BEHIND,STASHES,TAG,NUM_UNSTAGED_DELETED,NUM_STAGED_NEW,NUM_STAGED_DELETED,PUSH_REMOTE_NAME,PUSH_REMOTE_URL,PUSH_COMMITS_AHEAD,PUSH_COMMITS_BEHIND,NUM_SKIP_WORKTREE,NUM_ASSUME_UNCHANGED,COMMIT_ENCODING,COMMIT_SUMMARY}
+		return 0
+	fi
+
+	typeset -g VCS_STATUS_WORKDIR="${resp[1]}"
+	typeset -g VCS_STATUS_COMMIT="${resp[2]}"
+	typeset -g VCS_STATUS_LOCAL_BRANCH="${resp[3]}"
+	typeset -g VCS_STATUS_REMOTE_BRANCH="${resp[4]}"
+	typeset -g VCS_STATUS_REMOTE_NAME="${resp[5]}"
+	typeset -g VCS_STATUS_REMOTE_URL="${resp[6]}"
+	typeset -g VCS_STATUS_ACTION="${resp[7]}"
+	typeset -g VCS_STATUS_INDEX_SIZE="${resp[8]}"
+	typeset -g VCS_STATUS_NUM_STAGED="${resp[9]}"
+	typeset -g VCS_STATUS_NUM_UNSTAGED="${resp[10]}"
+	typeset -g VCS_STATUS_NUM_CONFLICTED="${resp[11]}"
+	typeset -g VCS_STATUS_NUM_UNTRACKED="${resp[12]}"
+	typeset -g VCS_STATUS_COMMITS_AHEAD="${resp[13]}"
+	typeset -g VCS_STATUS_COMMITS_BEHIND="${resp[14]}"
+	typeset -g VCS_STATUS_STASHES="${resp[15]}"
+	typeset -g VCS_STATUS_TAG="${resp[16]}"
+	typeset -g VCS_STATUS_NUM_UNSTAGED_DELETED="${resp[17]}"
+	typeset -g VCS_STATUS_NUM_STAGED_NEW="${resp[18]}"
+	typeset -g VCS_STATUS_NUM_STAGED_DELETED="${resp[19]}"
+	typeset -g VCS_STATUS_PUSH_REMOTE_NAME="${resp[20]}"
+	typeset -g VCS_STATUS_PUSH_REMOTE_URL="${resp[21]}"
+	typeset -g VCS_STATUS_PUSH_COMMITS_AHEAD="${resp[22]}"
+	typeset -g VCS_STATUS_PUSH_COMMITS_BEHIND="${resp[23]}"
+	typeset -g VCS_STATUS_NUM_SKIP_WORKTREE="${resp[24]}"
+	typeset -g VCS_STATUS_NUM_ASSUME_UNCHANGED="${resp[25]}"
+	typeset -g VCS_STATUS_COMMIT_ENCODING="${resp[26]}"
+	typeset -g VCS_STATUS_COMMIT_SUMMARY="${resp[27]}"
+
+	typeset -gi VCS_STATUS_{INDEX_SIZE,NUM_STAGED,NUM_UNSTAGED,NUM_CONFLICTED,NUM_UNTRACKED,COMMITS_AHEAD,COMMITS_BEHIND,STASHES,NUM_UNSTAGED_DELETED,NUM_STAGED_NEW,NUM_STAGED_DELETED,PUSH_COMMITS_AHEAD,PUSH_COMMITS_BEHIND,NUM_SKIP_WORKTREE,NUM_ASSUME_UNCHANGED}
+	typeset -gi VCS_STATUS_HAS_STAGED=$((VCS_STATUS_NUM_STAGED > 0))
+	typeset -gi VCS_STATUS_HAS_UNSTAGED=$((VCS_STATUS_NUM_UNSTAGED > 0))
+	typeset -gi VCS_STATUS_HAS_CONFLICTED=$((VCS_STATUS_NUM_CONFLICTED > 0))
+	typeset -gi VCS_STATUS_HAS_UNTRACKED=$((VCS_STATUS_NUM_UNTRACKED > 0))
+
+	if [[ -n $VCS_STATUS_WORKDIR ]]; then
+		typeset -g VCS_STATUS_RESULT=ok-sync
+	else
+		typeset -g VCS_STATUS_RESULT=norepo-sync
+	fi
+}
+
 function _shbot_send() {
 	if [[ $SHBOT_FD -eq 0 ]]; then
 		_shbot_debug "Cannot send '$1': no active connection"
@@ -77,6 +135,11 @@ function _shbot_read_handler() {
 		local payload="${rest#* }"
 		SHBOT_STATE[$state_id]="$payload"
 		_shbot_debug "Updated state: $state_id = $payload"
+
+		if [[ "$state_id" == "git" && -n "$SHBOT_SET_VCS_STATUS" ]]; then
+			_shbot_update_vcs_status "$payload"
+		fi
+
 		zle reset-prompt
 	fi
 }

@@ -90,6 +90,16 @@ connecting to the `shbot` daemon in the background.
   - `zshexit`: Properly cleans up file descriptors and the socket stream when
     the shell exits.
 
+### Theme & API Integrations
+
+The integration supports seamless migration from the widely used
+`romkatv/gitstatus` daemon. By setting `SHBOT_SET_VCS_STATUS=1`, `shbot` acts as
+an API proxy, unpacking its asynchronous state payloads to populate standard
+`VCS_STATUS_*` variables directly in the background. Combined with a few mocked
+shell functions (like `gitstatus_query`), this natively exposes `shbot`'s
+high-performance backend to highly demanding themes like `powerlevel10k` without
+needing any theme modification.
+
 ## 4. Integration Tests (`integration-tests/`)
 
 Because the Zsh plugin relies heavily on ZLE (`zle -F`), simple script execution

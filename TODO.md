@@ -64,3 +64,9 @@ stability:
 - [ ] **Zsh Plugin / System Daemon recovery**: Expand `integration-tests` to
       simulate crash recovery (e.g. stale `.pid` and `.socket` cleanup
       capability) and robust reconnection logic without panicking.
+
+## 7. API and Theme Integrations
+
+- [x] Create a drop-in replacement API for `gitstatusd` (e.g.
+      `romkatv/gitstatus`) to allow immediate migration for complex prompt
+      themes like `powerlevel10k`.

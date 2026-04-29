@@ -162,6 +162,34 @@ local action=$git_state[7] # e.g., 'rebase', 'merge'
 local commit_summary=$git_state[27]
 ```
 
+### Drop-in `gitstatusd` Replacement
+
+If you are currently using `romkatv/gitstatus` (for example, with
+`powerlevel10k`) and want an easy migration, you can use `shbot` as a drop-in
+replacement by enabling native VCS extraction and mocking the standard
+`gitstatus` functions.
+
+Add the following to your `~/.zshrc` _before_ your theme initializes:
+
+```zsh
+# Enable shbot to automatically populate standard VCS_STATUS_* variables
+typeset -g SHBOT_SET_VCS_STATUS=1
+
+# Mock the gitstatus API for themes like powerlevel10k
+function gitstatus_start() { return 0 }
+function gitstatus_stop()  { return 0 }
+function gitstatus_check() { return 0 }
+function gitstatus_query() {
+    emulate -L zsh -o no_aliases -o extended_glob -o typeset_silent
+    if [[ -n "$VCS_STATUS_WORKDIR" ]]; then
+        typeset -g VCS_STATUS_RESULT=ok-sync
+    else
+        typeset -g VCS_STATUS_RESULT=norepo-sync
+    fi
+    return 0
+}
+```
+
 The array indices map exactly to the standard `gitstatus` plugin variables:
 
 1. `workdir`
