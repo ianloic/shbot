@@ -55,3 +55,11 @@ find.
   always pull them into scope via `use` statements. Do not use inline `crate::`
   paths (e.g., `crate::error::Result`) anywhere in the code except within `use`
   declarations.
+
+## 4. Licensing
+
+When creating new source files (Rust, Zsh, Shell scripts, etc.), you must
+include the standard GPL-3.0-or-later copyright header at the top of the file.
+The copyright attribution should be `Copyright (C) 2026 Ian McKellar`. For shell
+scripts, ensure the `#!/usr/bin/env ...` shebang is the very first line before
+the copyright header.

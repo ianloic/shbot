@@ -219,3 +219,10 @@ The array indices map exactly to the standard `gitstatus` plugin variables:
 25. `num_assume_unchanged`
 26. `commit_encoding`
 27. `commit_summary`
+
+---
+
+## License
+
+`shbot` is licensed under the GPL-3.0-or-later license. See the
+[COPYING](COPYING) file for more details.
