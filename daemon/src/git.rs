@@ -380,4 +380,104 @@ mod tests {
         let (_, state) = get_git_state(root).unwrap().unwrap();
         assert_eq!(state.local_branch, state.commit[..7].to_string());
     }
+
+    #[test]
+    fn test_git_state_to_payload() {
+        let state = GitState {
+            workdir: "/work".to_string(),
+            commit: "1234567890abcdef".to_string(),
+            local_branch: "main".to_string(),
+            ..Default::default()
+        };
+        let payload = state.to_payload();
+        assert_eq!(payload.matches('\x1f').count(), 26);
+        assert!(payload.starts_with("/work\x1f1234567890abcdef\x1fmain\x1f"));
+    }
+
+    #[test]
+    fn test_git_action_states() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        run_git(&["init"], root);
+        let git_dir = root.join(".git");
+
+        // Test merge
+        fs::write(git_dir.join("MERGE_HEAD"), "dummy").unwrap();
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.action, "merge");
+        fs::remove_file(git_dir.join("MERGE_HEAD")).unwrap();
+
+        // Test rebase
+        fs::create_dir(git_dir.join("rebase-merge")).unwrap();
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.action, "rebase");
+        fs::remove_dir(git_dir.join("rebase-merge")).unwrap();
+
+        // Test cherry-pick
+        fs::write(git_dir.join("CHERRY_PICK_HEAD"), "dummy").unwrap();
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.action, "cherry");
+        fs::remove_file(git_dir.join("CHERRY_PICK_HEAD")).unwrap();
+
+        // Test revert
+        fs::write(git_dir.join("REVERT_HEAD"), "dummy").unwrap();
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.action, "revert");
+        fs::remove_file(git_dir.join("REVERT_HEAD")).unwrap();
+
+        // Test bisect
+        fs::write(git_dir.join("BISECT_LOG"), "dummy").unwrap();
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.action, "bisect");
+        fs::remove_file(git_dir.join("BISECT_LOG")).unwrap();
+    }
+
+    #[test]
+    fn test_git_remote_tracking() {
+        let remote_dir = tempdir().unwrap();
+        let remote_root = remote_dir.path();
+        run_git(&["init", "--bare", "--initial-branch=main"], remote_root);
+
+        let local_dir = tempdir().unwrap();
+        let local_root = local_dir.path();
+        run_git(&["init", "--initial-branch=main"], local_root);
+        run_git(&["config", "user.name", "Test User"], local_root);
+        run_git(&["config", "user.email", "test@example.com"], local_root);
+
+        // create a commit
+        fs::write(local_root.join("test.txt"), "hello").unwrap();
+        run_git(&["add", "test.txt"], local_root);
+        run_git(&["commit", "-m", "Initial commit"], local_root);
+
+        // Add remote
+        let remote_url = format!("file://{}", remote_root.display());
+        run_git(&["remote", "add", "origin", &remote_url], local_root);
+
+        // Push to set upstream
+        run_git(&["push", "-u", "origin", "main"], local_root);
+
+        // check state
+        let (_, state) = get_git_state(local_root).unwrap().unwrap();
+        assert_eq!(state.remote_name, "origin");
+        assert_eq!(state.remote_url, remote_url);
+        assert_eq!(state.remote_branch, "main");
+        assert_eq!(state.commits_ahead, 0);
+        assert_eq!(state.commits_behind, 0);
+
+        // Make another commit local to be ahead
+        fs::write(local_root.join("test.txt"), "hello ahead").unwrap();
+        run_git(&["add", "test.txt"], local_root);
+        run_git(&["commit", "-m", "Ahead commit"], local_root);
+
+        let (_, state) = get_git_state(local_root).unwrap().unwrap();
+        assert_eq!(state.commits_ahead, 1);
+        assert_eq!(state.commits_behind, 0);
+
+        // set push remote differently
+        run_git(&["config", "branch.main.pushRemote", "origin"], local_root);
+        let (_, state) = get_git_state(local_root).unwrap().unwrap();
+        assert_eq!(state.push_remote_name, "origin");
+        assert_eq!(state.push_commits_ahead, 1);
+    }
 }

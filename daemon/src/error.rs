@@ -79,3 +79,37 @@ impl From<tracing::subscriber::SetGlobalDefaultError> for ShbotError {
         ShbotError::TracingSub(err)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_display() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err = ShbotError::Io(io_err);
+        assert_eq!(err.to_string(), "IO Error: file not found");
+
+        let custom_err = ShbotError::Custom("custom error".to_string());
+        assert_eq!(custom_err.to_string(), "custom error");
+
+        let env_err = std::env::VarError::NotPresent;
+        let err2 = ShbotError::EnvVar(env_err);
+        assert_eq!(err2.to_string(), "Environment variable error: environment variable not found");
+    }
+
+    #[test]
+    fn test_error_from() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
+        let err: ShbotError = io_err.into();
+        assert!(matches!(err, ShbotError::Io(_)));
+
+        let env_err = std::env::VarError::NotPresent;
+        let err2: ShbotError = env_err.into();
+        assert!(matches!(err2, ShbotError::EnvVar(_)));
+        
+        let git_err = git2::Error::from_str("git error");
+        let err3: ShbotError = git_err.into();
+        assert!(matches!(err3, ShbotError::Git2(_)));
+    }
+}

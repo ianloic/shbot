@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_daemon_crash_recovery() -> Result<(), Box<dyn std::error::Error>> {
-        let mut env = TestEnv::new()?;
+        let env = TestEnv::new()?;
         
         // 1. Start daemon via 'connect'
         env.start_connect()?;

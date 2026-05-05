@@ -177,7 +177,7 @@ impl AppState {
     pub async fn invalidate(&self, query: &str) {
         let mut clients = self.clients.write().await;
         for client in clients.values_mut() {
-            if query == "*" {
+            if query == "*" || query == "all" {
                 client.last_state.clear();
             } else {
                 client.last_state.remove(query);

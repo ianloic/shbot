@@ -115,7 +115,13 @@ async fn handle_connection(
 
     loop {
         line.clear();
-        let bytes_read = reader.read_line(&mut line).await?;
+        let bytes_read = match reader.read_line(&mut line).await {
+            Ok(b) => b,
+            Err(e) => {
+                error!("Socket read error: {}", e);
+                break;
+            }
+        };
         if bytes_read == 0 {
             break; // EOF
         }
@@ -335,4 +341,122 @@ async fn handle_connection(
 
     writer_task.abort();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::state::AppState;
+    use crate::watcher::SyncWatcher;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    async fn setup_server() -> (UnixStream, tokio::task::JoinHandle<()>, Arc<AppState>, Arc<SyncWatcher>) {
+        let (client, server) = UnixStream::pair().unwrap();
+        let state = AppState::new();
+        let watcher = SyncWatcher::new();
+        let (config_tx, config_rx) = tokio::sync::watch::channel(Config::default());
+
+        let state_clone = state.clone();
+        let watcher_clone = watcher.clone();
+        let server_task = tokio::spawn(async move {
+            let _ = handle_connection(server, state_clone, config_rx, config_tx, watcher_clone).await;
+        });
+
+        (client, server_task, state, watcher)
+    }
+
+    async fn sync_client(_client: &mut UnixStream) -> String {
+        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+        String::new()
+    }
+
+    #[tokio::test]
+    async fn test_server_hello_cd() {
+        let (mut client, _server_task, state, _watcher) = setup_server().await;
+
+        client.write_all(b"hello 12345\n").await.unwrap();
+        sync_client(&mut client).await;
+        assert_eq!(state.get_cwd(12345).await.unwrap(), PathBuf::from(""));
+
+        client.write_all(b"cd /tmp\n").await.unwrap();
+        sync_client(&mut client).await;
+        assert_eq!(state.get_cwd(12345).await.unwrap(), PathBuf::from("/tmp"));
+
+        client.write_all(b"status\n").await.unwrap();
+        let mut buf = String::new();
+        client.read_to_string(&mut buf).await.unwrap();
+        assert!(buf.contains("12345"));
+    }
+
+    #[tokio::test]
+    async fn test_server_reload_error() {
+        let (mut client, _server_task, _state, _watcher) = setup_server().await;
+
+        let temp_home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("HOME", temp_home.path()); }
+        let config_dir = temp_home.path().join(".config").join("shbot");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("shbot.toml"), "invalid toml syntax = {").unwrap();
+
+        client.write_all(b"reload\n").await.unwrap();
+        client.write_all(b"status\n").await.unwrap(); // Close connection
+        let mut buf = String::new();
+        client.read_to_string(&mut buf).await.unwrap();
+        assert!(buf.contains("error: failed to load config"));
+    }
+
+    #[tokio::test]
+    async fn test_server_loglevel() {
+        let (mut client, _server_task, _state, _watcher) = setup_server().await;
+
+        client.write_all(b"loglevel debug\n").await.unwrap();
+        client.write_all(b"status\n").await.unwrap(); // close connection
+        let mut buf = String::new();
+        client.read_to_string(&mut buf).await.unwrap();
+        assert!(buf.contains("error: log reload handle not initialized"));
+    }
+
+    #[tokio::test]
+    async fn test_server_invalidate() {
+        let (mut client, _server_task, state, _watcher) = setup_server().await;
+
+        client.write_all(b"hello 12345\n").await.unwrap();
+        sync_client(&mut client).await;
+
+        state.send_to(12345, "custom", "somedata").await;
+        assert!(state.clients.read().await.get(&12345).unwrap().last_state.contains_key("custom"));
+
+        client.write_all(b"invalidate all\n").await.unwrap();
+        sync_client(&mut client).await;
+
+        assert!(!state.clients.read().await.get(&12345).unwrap().last_state.contains_key("custom"));
+    }
+
+    #[tokio::test]
+    async fn test_server_unknown_command() {
+        let (mut client, _server_task, _state, _watcher) = setup_server().await;
+        client.write_all(b"fakecommand arg\n").await.unwrap();
+        client.write_all(b"status\n").await.unwrap();
+        let mut buf = String::new();
+        client.read_to_string(&mut buf).await.unwrap();
+        assert!(buf.contains("status:"));
+    }
+
+    #[tokio::test]
+    async fn test_client_disconnect_unwatches() {
+        let (mut client, server_task, state, watcher) = setup_server().await;
+
+        client.write_all(b"hello 9999\n").await.unwrap();
+        client.write_all(b"cd /tmp\n").await.unwrap();
+        sync_client(&mut client).await;
+        
+        drop(client);
+        let _ = server_task.await; 
+
+        assert!(state.get_cwd(9999).await.is_none());
+        assert_eq!(watcher.get_watch_count(), 0);
+    }
 }
