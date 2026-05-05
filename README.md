@@ -30,8 +30,6 @@ This script will seamlessly compile the daemon using
 
 ### 2. Shell Setup
 
-### 2. Shell Setup
-
 If you used `./install.sh`, this is already done for you! Otherwise, add the
 bundled Zsh plugin to your `~/.zshrc`:
 

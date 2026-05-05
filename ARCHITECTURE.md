@@ -21,9 +21,9 @@ and broadcasting state updates back to specific shells.
   initially bootstrap), `status` (for troubleshooting), `reload` (for dynamic
   config reload) and `loglevel` (for dynamic log filtering).
 - **`server.rs`:** Manages the UNIX socket listener
-  (`~/.local/state/shbot/socket/<HOSTNAME>.socket`). It accepts incoming shell
-  connections, registers them, and handles incoming commands (like `cd`) to
-  update the daemon's awareness of where the shell is currently operating.
+  (`~/.local/state/shbot/<HOST>.socket`). It accepts incoming shell connections,
+  registers them, and handles incoming commands (like `cd`) to update the
+  daemon's awareness of where the shell is currently operating.
 - **`state.rs` (`AppState`):** A thread-safe, central registry of all connected
   `ClientInfo`s (using `tokio::sync::RwLock` around a `HashMap`). It maps PID to
   Working Directory (CWD) and holds a messaging channel (`mpsc::Sender<String>`)
