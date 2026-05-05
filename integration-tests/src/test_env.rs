@@ -87,6 +87,32 @@ impl TestEnv {
         Ok(())
     }
 
+    pub fn start_connect(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let shbot_bin = Self::get_shbot_bin_path()?;
+
+        let status = Command::new(shbot_bin)
+            .arg("connect")
+            .env("HOME", self.home_dir.path())
+            .env("HOST", &self.host)
+            .env("RUST_LOG", "debug")
+            .status()?;
+
+        if !status.success() {
+            return Err("shbot connect failed".into());
+        }
+
+        let socket_path = self.home_dir.path().join(format!(".local/state/shbot/{}.socket", self.host));
+        let start = std::time::Instant::now();
+        while !socket_path.exists() {
+            if start.elapsed().as_secs() > 10 {
+                return Err(format!("Daemon socket was not created at {:?}", socket_path).into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        Ok(())
+    }
+
     pub fn kill_daemon(&mut self) {
         if let Some(mut cmd) = self.daemon_cmd.take() {
             let pid = cmd.id();
@@ -95,6 +121,17 @@ impl TestEnv {
                 .arg(pid.to_string())
                 .status();
             let _ = cmd.wait(); // Wait for the process to exit and flush coverage
+        }
+    }
+
+    pub fn abort_daemon(&mut self) {
+        if let Some(mut cmd) = self.daemon_cmd.take() {
+            let pid = cmd.id();
+            let _ = Command::new("kill")
+                .arg("-KILL")
+                .arg(pid.to_string())
+                .status();
+            let _ = cmd.wait(); // Wait for the process to exit
         }
     }
 

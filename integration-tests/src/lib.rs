@@ -194,4 +194,52 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_daemon_crash_recovery() -> Result<(), Box<dyn std::error::Error>> {
+        let mut env = TestEnv::new()?;
+        
+        // 1. Start daemon via 'connect'
+        env.start_connect()?;
+        
+        let socket_path = env.home_dir.path().join(format!(".local/state/shbot/{}.socket", env.host));
+        let pid_path = env.home_dir.path().join(format!(".local/state/shbot/{}.pid", env.host));
+        
+        assert!(socket_path.exists());
+        assert!(pid_path.exists());
+        
+        // 2. Read PID and kill it abruptly (SIGKILL)
+        let pid_str = std::fs::read_to_string(&pid_path)?;
+        let pid = pid_str.trim().parse::<u32>()?;
+        
+        std::process::Command::new("kill")
+            .arg("-KILL")
+            .arg(pid.to_string())
+            .status()?;
+            
+        std::thread::sleep(std::time::Duration::from_millis(500)); // wait for kill to take effect
+        
+        assert!(socket_path.exists(), "Socket file should remain after crash");
+        assert!(pid_path.exists(), "PID file should remain after crash");
+
+        // 3. Start daemon again via 'connect' (it should clean up stale files and start successfully)
+        env.start_connect()?;
+        
+        // Ensure it's up
+        let shbot_bin = TestEnv::get_shbot_bin_path()?;
+        let out = std::process::Command::new(&shbot_bin)
+            .arg("status")
+            .env("HOME", env.home_dir.path())
+            .env("HOST", &env.host)
+            .output()?;
+        
+        assert!(out.status.success(), "Daemon should respond to status after crash recovery");
+        
+        // Final cleanup
+        let new_pid_str = std::fs::read_to_string(&pid_path)?;
+        let new_pid = new_pid_str.trim().parse::<u32>()?;
+        let _ = std::process::Command::new("kill").arg("-TERM").arg(new_pid.to_string()).status();
+        
+        Ok(())
+    }
 }

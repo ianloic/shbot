@@ -59,9 +59,9 @@ stability:
 - [x] **`daemon/src/state.rs`**: Caching tests to verify diffing functionality
       accurately prevents redundant identical state updates from being spammed
       to clients.
-- [ ] **`daemon/src/config.rs`**: Unit tests validating configuration file
+- [x] **`daemon/src/config.rs`**: Unit tests validating configuration file
       loading and fallback behaviors.
-- [ ] **Zsh Plugin / System Daemon recovery**: Expand `integration-tests` to
+- [x] **Zsh Plugin / System Daemon recovery**: Expand `integration-tests` to
       simulate crash recovery (e.g. stale `.pid` and `.socket` cleanup
       capability) and robust reconnection logic without panicking.
 
