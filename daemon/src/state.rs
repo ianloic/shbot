@@ -16,6 +16,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{RwLock, mpsc};
 
 pub type Pid = u32;
@@ -29,12 +30,16 @@ pub struct ClientInfo {
 
 pub struct AppState {
     pub clients: RwLock<HashMap<Pid, ClientInfo>>,
+    pub last_git_refresh_micros: AtomicU64,
+    pub last_trigger_refresh_micros: AtomicU64,
 }
 
 impl AppState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             clients: RwLock::new(HashMap::new()),
+            last_git_refresh_micros: AtomicU64::new(0),
+            last_trigger_refresh_micros: AtomicU64::new(0),
         })
     }
 
@@ -133,9 +138,32 @@ impl AppState {
             .collect()
     }
 
-    pub async fn get_client_count(&self) -> usize {
+    pub async fn get_status_dump(&self, num_monitors: usize) -> String {
         let clients = self.clients.read().await;
-        clients.len()
+        let mut dump = format!("shbot daemon status:\n");
+        dump.push_str(&format!("  Clients connected: {}\n", clients.len()));
+
+        for (pid, info) in clients.iter() {
+            dump.push_str(&format!("    - PID: {}\n", pid));
+            dump.push_str(&format!("      CWD: {}\n", info.cwd.display()));
+            dump.push_str(&format!("      Cached States: {}\n", info.last_state.len()));
+            for (state_id, _payload) in info.last_state.iter() {
+                dump.push_str(&format!("        - {}\n", state_id));
+            }
+        }
+
+        dump.push_str("State Collection:\n");
+        dump.push_str(&format!("  Active File Monitors: {}\n", num_monitors));
+        dump.push_str(&format!(
+            "  Last Git Refresh: {} ms\n",
+            self.last_git_refresh_micros.load(Ordering::Relaxed) as f64 / 1000.0
+        ));
+        dump.push_str(&format!(
+            "  Last File Trigger Refresh: {} ms\n",
+            self.last_trigger_refresh_micros.load(Ordering::Relaxed) as f64 / 1000.0
+        ));
+
+        dump
     }
 
     pub async fn invalidate(&self, query: &str) {

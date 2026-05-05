@@ -113,8 +113,9 @@ interaction:
 - `shbot connect`: Bootstraps the daemon (spawns it in the background if not
   running).
 - `shbot daemon`: Runs the long-lived daemon server directly in the foreground.
-- `shbot status`: Requests the current internal state (e.g. number of connected
-  clients) from the running daemon.
+- `shbot status`: Requests the current internal state from the running daemon,
+  including detailed client information (like CWDs) and state collection metrics
+  (e.g. file monitor count and git refresh times).
 - `shbot reload`: Forces the daemon to reload its configuration file
   dynamically.
 - `shbot loglevel <level>`: Dynamically sets the daemon's runtime log filter

@@ -197,13 +197,24 @@ async fn handle_connection(
                         }
                     }
 
+                    let start_git = std::time::Instant::now();
                     if let Ok(Some((_, git_state))) = get_git_state(&path) {
                         state.send_to(pid, "git", &git_state.to_payload()).await;
                     } else {
                         state.send_to(pid, "git", "").await;
                     }
+                    state.last_git_refresh_micros.store(
+                        start_git.elapsed().as_micros() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+
                     let config = config_rx.borrow().clone();
+                    let start_trigger = std::time::Instant::now();
                     evaluate_file_triggers(&path, &state, &config, None).await;
+                    state.last_trigger_refresh_micros.store(
+                        start_trigger.elapsed().as_micros() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                 } else {
                     warn!("Received cd before hello");
                 }
@@ -265,8 +276,7 @@ async fn handle_connection(
             }
             "status" => {
                 // Send a status dump to this unique connection, then close
-                let count = state.get_client_count().await;
-                let dump = format!("status: {} clients connected\n", count);
+                let dump = state.get_status_dump(watcher.get_watch_count()).await;
                 let _ = tx.try_send(dump);
 
                 // Yield to ensure the writer has a chance to write before we break and close the socket.

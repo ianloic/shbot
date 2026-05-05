@@ -129,19 +129,33 @@ impl SyncWatcher {
                             cwd,
                             affected_paths.len()
                         );
+                        let start_git = std::time::Instant::now();
                         if let Ok(Some((_, git_state))) = get_git_state(&cwd) {
                             state
                                 .broadcast_to_cwd(&cwd, "git", &git_state.to_payload())
                                 .await;
                         }
+                        state.last_git_refresh_micros.store(
+                            start_git.elapsed().as_micros() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
 
+                        let start_trigger = std::time::Instant::now();
                         evaluate_file_triggers(&cwd, &state, &config, Some(&affected_paths)).await;
+                        state.last_trigger_refresh_micros.store(
+                            start_trigger.elapsed().as_micros() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                     }
                 }
             }
         });
 
         Ok(())
+    }
+
+    pub fn get_watch_count(&self) -> usize {
+        self.watched_paths.lock().unwrap().len()
     }
 
     pub fn watch(&self, path: &Path) {

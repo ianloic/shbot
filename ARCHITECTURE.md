@@ -150,5 +150,5 @@ manual debugging.
   the client whenever background tasks complete or file system changes are
   detected. Modifies the shell's prompt securely without blocking input.
   Examples: `update git dirty`, `update periodic true`.
-- `status: <count> clients connected`: A single-line response provided to the
-  `shbot status` CLI command.
+- `shbot daemon status:\n...`: A multi-line response provided to the
+  `shbot status` CLI command containing detailed client and metric information.
