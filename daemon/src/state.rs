@@ -30,7 +30,7 @@ pub struct ClientInfo {
 
 pub struct AppState {
     pub clients: RwLock<HashMap<Pid, ClientInfo>>,
-    pub last_git_refresh_micros: AtomicU64,
+    pub git_latencies: RwLock<HashMap<PathBuf, u64>>,
     pub last_trigger_refresh_micros: AtomicU64,
 }
 
@@ -38,7 +38,7 @@ impl AppState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             clients: RwLock::new(HashMap::new()),
-            last_git_refresh_micros: AtomicU64::new(0),
+            git_latencies: RwLock::new(HashMap::new()),
             last_trigger_refresh_micros: AtomicU64::new(0),
         })
     }
@@ -155,13 +155,21 @@ impl AppState {
         dump.push_str("State Collection:\n");
         dump.push_str(&format!("  Active File Monitors: {}\n", num_monitors));
         dump.push_str(&format!(
-            "  Last Git Refresh: {} ms\n",
-            self.last_git_refresh_micros.load(Ordering::Relaxed) as f64 / 1000.0
-        ));
-        dump.push_str(&format!(
             "  Last File Trigger Refresh: {} ms\n",
             self.last_trigger_refresh_micros.load(Ordering::Relaxed) as f64 / 1000.0
         ));
+
+        let git_latencies = self.git_latencies.read().await;
+        if !git_latencies.is_empty() {
+            dump.push_str("  Git Monitor Latencies:\n");
+            for (path, micros) in git_latencies.iter() {
+                dump.push_str(&format!(
+                    "    - {}: {} ms\n",
+                    path.display(),
+                    *micros as f64 / 1000.0
+                ));
+            }
+        }
 
         dump
     }

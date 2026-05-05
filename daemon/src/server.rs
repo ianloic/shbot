@@ -187,6 +187,7 @@ async fn handle_connection(
                                         old_watch_target
                                     );
                                     watcher.unwatch(&old_watch_target);
+                                    state.git_latencies.write().await.remove(&old_watch_target);
                                 } else {
                                     tracing::debug!(
                                         "Keeping watch on target {:?} as it is still used by another active cwd",
@@ -198,15 +199,16 @@ async fn handle_connection(
                     }
 
                     let start_git = std::time::Instant::now();
-                    if let Ok(Some((_, git_state))) = get_git_state(&path) {
+                    if let Ok(Some((root, git_state))) = get_git_state(&path) {
                         state.send_to(pid, "git", &git_state.to_payload()).await;
+                        state
+                            .git_latencies
+                            .write()
+                            .await
+                            .insert(PathBuf::from(root), start_git.elapsed().as_micros() as u64);
                     } else {
                         state.send_to(pid, "git", "").await;
                     }
-                    state.last_git_refresh_micros.store(
-                        start_git.elapsed().as_micros() as u64,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
 
                     let config = config_rx.borrow().clone();
                     let start_trigger = std::time::Instant::now();
@@ -320,6 +322,7 @@ async fn handle_connection(
                     old_watch_target
                 );
                 watcher.unwatch(&old_watch_target);
+                state.git_latencies.write().await.remove(&old_watch_target);
             } else {
                 tracing::debug!(
                     "Client {} disconnected, keeping watch on target {:?} as it is still used by another active cwd",
