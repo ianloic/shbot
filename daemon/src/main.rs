@@ -160,6 +160,16 @@ fn handle_daemon(pre_bound_listener: Option<std::os::unix::net::UnixListener>) -
             }
         });
 
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            if let Ok(mut sig_term) = signal(SignalKind::terminate()) {
+                if let Some(_) = sig_term.recv().await {
+                    info!("Received SIGTERM, shutting down cleanly to flush coverage");
+                    std::process::exit(0);
+                }
+            }
+        });
+
         runner::start_periodic_triggers(state.clone(), config_rx.clone());
 
         let watcher = watcher::SyncWatcher::new();

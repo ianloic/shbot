@@ -47,11 +47,14 @@ impl TestEnv {
     }
 
     pub fn get_shbot_bin_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let mut shbot_bin = std::env::current_exe()?;
-        shbot_bin.pop();
-        shbot_bin.pop();
-        shbot_bin.push("shbot");
-
+        let shbot_bin = std::env::var("SHBOT_BIN_PATH").map(PathBuf::from).unwrap_or_else(|_| {
+            let mut path = std::env::current_exe().expect("Failed to get current executable path");
+            path.pop();
+            path.pop();
+            path.push("shbot");
+            path
+        });
+        
         if !shbot_bin.exists() {
             Err(format!("shbot binary not found at {:?}", shbot_bin).into())
         } else {
@@ -86,7 +89,12 @@ impl TestEnv {
 
     pub fn kill_daemon(&mut self) {
         if let Some(mut cmd) = self.daemon_cmd.take() {
-            let _ = cmd.kill();
+            let pid = cmd.id();
+            let _ = Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status();
+            let _ = cmd.wait(); // Wait for the process to exit and flush coverage
         }
     }
 
