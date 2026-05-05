@@ -110,7 +110,7 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
             let mut oid_str = target.to_string();
             state.commit = oid_str.clone();
 
-            if state.local_branch.is_empty() {
+            if state.local_branch.is_empty() || state.local_branch == "HEAD" {
                 oid_str.truncate(7);
                 state.local_branch = oid_str;
             }
@@ -306,4 +306,78 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
     }
 
     Ok(Some((root, state)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    fn run_git(args: &[&str], cwd: &Path) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("Failed to execute git");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn test_git_state_uninitialized() {
+        let dir = tempdir().unwrap();
+        let state = get_git_state(dir.path()).unwrap();
+        assert!(state.is_none());
+    }
+
+    #[test]
+    fn test_git_state_initialized() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        run_git(&["init"], root);
+        run_git(&["config", "user.name", "Test User"], root);
+        run_git(&["config", "user.email", "test@example.com"], root);
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.local_branch, "main");
+        assert_eq!(state.num_staged, 0);
+        assert_eq!(state.num_unstaged, 0);
+        assert_eq!(state.num_untracked, 0);
+
+        // Add an untracked file
+        fs::write(root.join("test.txt"), "hello").unwrap();
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.num_untracked, 1);
+
+        // Stage the file
+        run_git(&["add", "test.txt"], root);
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.num_staged, 1);
+        assert_eq!(state.num_untracked, 0);
+
+        // Commit the file
+        run_git(&["commit", "-m", "Initial commit"], root);
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.num_staged, 0);
+        assert_eq!(state.num_untracked, 0);
+        assert_eq!(state.commit_summary, "Initial commit");
+
+        // Modify the file
+        fs::write(root.join("test.txt"), "hello world").unwrap();
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.num_unstaged, 1);
+
+        // Stage the modification
+        run_git(&["add", "test.txt"], root);
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.num_staged, 1);
+        assert_eq!(state.num_unstaged, 0);
+
+        // Test detached HEAD
+        run_git(&["checkout", "--detach", "HEAD"], root);
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.local_branch, state.commit[..7].to_string());
+    }
 }

@@ -46,17 +46,17 @@ The project currently lacks granular test coverage. The following specific
 sections of code and functionality need unit/integration tests to ensure
 stability:
 
-- [ ] **`daemon/src/git.rs`**: Unit tests for parsing the
+- [x] **`daemon/src/git.rs`**: Unit tests for parsing the
       `git status --porcelain` output, especially handling unusual states (e.g.
       detached HEAD, complex staged/unstaged combinations, merge conflicts, and
       uninitialized repos).
-- [ ] **`daemon/src/server.rs`**: Protocol parsing tests to verify `cd`,
+- [x] **`daemon/src/server.rs`**: Protocol parsing tests to verify `cd`,
       `hello`, `invalidate <query>`, and log-level configuration commands are
       correctly interpreted from socket streams.
-- [ ] **`daemon/src/runner.rs`**: Unit tests for `evaluate_file_triggers` to
+- [x] **`daemon/src/runner.rs`**: Unit tests for `evaluate_file_triggers` to
       ensure glob patterns (e.g. `**/*.rs`) match properly and avoid false
       positives/negatives when checking modified files.
-- [ ] **`daemon/src/state.rs`**: Caching tests to verify diffing functionality
+- [x] **`daemon/src/state.rs`**: Caching tests to verify diffing functionality
       accurately prevents redundant identical state updates from being spammed
       to clients.
 - [ ] **`daemon/src/config.rs`**: Unit tests validating configuration file

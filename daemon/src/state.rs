@@ -219,4 +219,51 @@ mod tests {
         // Client 2 disconnects
         state.remove_client(200).await;
     }
+
+    #[tokio::test]
+    async fn test_state_caching_and_invalidation() {
+        let state = AppState::new();
+        let (tx, mut rx) = mpsc::channel(10);
+        let path = PathBuf::from("/tmp/test");
+
+        state.add_client(1, path.clone(), tx).await;
+
+        // 1. Initial send
+        state.send_to(1, "git", "initial payload").await;
+        let msg = rx.recv().await.unwrap();
+        assert_eq!(msg, "update git initial payload\n");
+
+        // 2. Duplicate send (should be cached, not sent)
+        state.send_to(1, "git", "initial payload").await;
+        assert!(
+            rx.try_recv().is_err(),
+            "Duplicate payload should not be sent"
+        );
+
+        // 3. Different payload (should be sent)
+        state.send_to(1, "git", "new payload").await;
+        let msg = rx.recv().await.unwrap();
+        assert_eq!(msg, "update git new payload\n");
+
+        // 4. Invalidate specific query
+        state.invalidate("git").await;
+        state.send_to(1, "git", "new payload").await;
+        let msg = rx.recv().await.unwrap();
+        assert_eq!(
+            msg, "update git new payload\n",
+            "Payload should be sent again after invalidation"
+        );
+
+        // 5. Invalidate all
+        state.send_to(1, "other", "something").await;
+        let _ = rx.recv().await.unwrap();
+        state.invalidate("*").await;
+
+        state.send_to(1, "other", "something").await;
+        let msg = rx.recv().await.unwrap();
+        assert_eq!(
+            msg, "update other something\n",
+            "Payload should be sent again after wildcard invalidation"
+        );
+    }
 }

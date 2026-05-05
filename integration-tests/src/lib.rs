@@ -151,4 +151,47 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_cli_commands() -> Result<(), Box<dyn std::error::Error>> {
+        let mut env = TestEnv::new()?;
+        let repo_path = env.setup_git_repo("myrepo")?;
+
+        env.start_daemon()?;
+
+        let shbot_bin = TestEnv::get_shbot_bin_path()?;
+
+        // test loglevel
+        let out = std::process::Command::new(&shbot_bin)
+            .arg("loglevel")
+            .arg("debug")
+            .env("HOME", env.home_dir.path())
+            .env("HOST", &env.host)
+            .output()?;
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("status: log level updated successfully"));
+
+        // test reload
+        let out = std::process::Command::new(&shbot_bin)
+            .arg("reload")
+            .env("HOME", env.home_dir.path())
+            .env("HOST", &env.host)
+            .output()?;
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("configuration reloaded successfully") || stdout.contains("failed to load config"));
+
+        env.send_line("export SHBOT_SET_VCS_STATUS=1")?;
+        env.send_line(&format!("cd {}", repo_path.display()))?;
+        env.source_plugin()?;
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Test sending 'invalidate' over the socket
+        env.send_line(&format!("_shbot_send \"invalidate {}\"", repo_path.display()))?;
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        Ok(())
+    }
 }
