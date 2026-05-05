@@ -8,7 +8,7 @@ required to make `shbot` production-ready.
 - [x] Create `shbot.service` and `shbot.socket` configuration files for systemd
       user service deployment leveraging `listenfd`.
 - [x] Create an `install.sh` script or `Makefile` to automatically build
-      `shbot`, install the binaries to `~/.local/bin`, and configure `~/.zshrc`.
+      `shbot`, install the binaries to `~/.cargo/bin`, and configure `~/.zshrc`.
 
 ## 2. Advanced "File-Change" Trigger Patterns
 

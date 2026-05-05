@@ -21,9 +21,12 @@ cd shbot
 ./install.sh
 ```
 
-This script will seamlessly compile the daemon, copy the binary to
-`~/.local/bin/`, set up `systemd` socket activation, and configure your
-`~/.zshrc`.
+This script will seamlessly compile the daemon using
+`cargo install --path daemon`, copy the binary to `~/.cargo/bin/`, set up
+`systemd` socket activation, and configure your `~/.zshrc`.
+
+> **Important:** Ensure that `~/.cargo/bin` is in your system's `$PATH` so the
+> shell can discover the `shbot` command.
 
 ### 2. Shell Setup
 

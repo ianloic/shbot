@@ -17,14 +17,8 @@
 
 set -e
 
-echo "Building shbot..."
-cd daemon
-cargo build --release
-cd ..
-
-echo "Installing shbot binary to ~/.local/bin..."
-mkdir -p ~/.local/bin
-cp target/release/shbot ~/.local/bin/shbot
+echo "Installing shbot binary to ~/.cargo/bin..."
+cargo install --path daemon
 
 echo "Installing systemd user services..."
 mkdir -p ~/.config/systemd/user

@@ -4,7 +4,7 @@ Requires=shbot.socket
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/shbot daemon
+ExecStart=%h/.cargo/bin/shbot daemon
 Restart=on-failure
 RestartSec=5
 # Output will go to journald automatically
