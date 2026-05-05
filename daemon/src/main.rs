@@ -297,3 +297,37 @@ pub fn get_socket_path() -> Result<PathBuf> {
 
     Ok(path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_hostname_from_env() {
+        unsafe {
+            std::env::set_var("HOST", "testhost-1");
+            std::env::remove_var("HOSTNAME");
+        }
+        assert_eq!(get_hostname(), "testhost-1");
+
+        unsafe {
+            std::env::remove_var("HOST");
+            std::env::set_var("HOSTNAME", "testhost-2");
+        }
+        assert_eq!(get_hostname(), "testhost-2");
+    }
+
+    #[test]
+    fn test_get_socket_path() {
+        unsafe {
+            std::env::set_var("HOME", "/tmp/testhome");
+            std::env::set_var("HOST", "testhost");
+        }
+        
+        let path = get_socket_path().unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/testhome/.local/state/shbot/testhost.socket")
+        );
+    }
+}
