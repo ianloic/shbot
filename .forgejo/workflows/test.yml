@@ -18,11 +18,14 @@ jobs:
           apt-get update
           apt-get install -y zsh
 
-      - name: Install mise and toolchains
+      - name: Install mise
         uses: https://github.com/jdx/mise-action@v2
         with:
-          install: true
+          install: false
           github_token: ''
+
+      - name: Install toolchains
+        run: mise install
         env:
           GITHUB_TOKEN: ''
 
