@@ -4,6 +4,7 @@ shfmt = "3.7.0"
 dprint = "0.45.0"
 "cargo:cargo-llvm-cov" = "latest"
 "cargo:cargo-binstall" = "latest"
+"cargo:forgejo-cli" = "latest"
 
 [tasks.fmt]
 description = "Format Rust, Zsh scripts, and Markdown"
