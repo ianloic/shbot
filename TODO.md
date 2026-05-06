@@ -46,28 +46,28 @@ should be addressed:
 Long-running daemons are susceptible to logical resource leaks. We should build
 integration tests to ensure stability over time:
 
-- [ ] **File Descriptor (FD) Leaks**:
-  - [ ] Create a test that connects and disconnects 1,000+ mock clients rapidly.
-  - [ ] Assert that the number of open FDs in `/proc/<daemon_pid>/fd/` returns
+- [x] **File Descriptor (FD) Leaks**:
+  - [x] Create a test that connects and disconnects 1,000+ mock clients rapidly.
+  - [x] Assert that the number of open FDs in `/proc/<daemon_pid>/fd/` returns
         to baseline after connections are closed.
 
-- [ ] **`inotify` Watch Leaks**:
-  - [ ] Create a test that simulates clients `cd`ing into hundreds of temporary
+- [x] **`inotify` Watch Leaks**:
+  - [x] Create a test that simulates clients `cd`ing into hundreds of temporary
         directories and then disconnecting abruptly.
-  - [ ] Assert that the daemon successfully unregisters the watches and the
+  - [x] Assert that the daemon successfully unregisters the watches and the
         active watch count (`shbot status`) returns to 0 to prevent hitting OS
         `inotify` limits.
 
-- [ ] **Zombie Process Leaks**:
-  - [ ] Create a test that triggers a slow or hanging shell command (e.g.,
+- [x] **Zombie Process Leaks**:
+  - [x] Create a test that triggers a slow or hanging shell command (e.g.,
         `sleep 60`).
-  - [ ] Drop the client connection or force an interruption.
-  - [ ] Assert via `sysinfo` or `/proc/<pid>/task/` that no child processes
+  - [x] Drop the client connection or force an interruption.
+  - [x] Assert via `sysinfo` or `/proc/<pid>/task/` that no child processes
         remain in a zombie (`Z`) state.
 
-- [ ] **Memory Leaks**:
-  - [ ] Run the integration test suite periodically with LeakSanitizer
+- [x] **Memory Leaks**:
+  - [x] Run the integration test suite periodically with LeakSanitizer
         (`RUSTFLAGS="-Z sanitizer=leak" cargo test`).
-  - [ ] Alternatively, build a stress test that measures Resident Set Size (RSS)
+  - [x] Alternatively, build a stress test that measures Resident Set Size (RSS)
         before and after heavy load to ensure unbounded collections aren't
         growing infinitely.

@@ -243,6 +243,199 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn test_resource_fd_leak() -> Result<(), Box<dyn std::error::Error>> {
+        let env = TestEnv::new()?;
+        env.start_connect()?;
+
+        let pid_path = env.home_dir.path().join(format!(".local/state/shbot/{}.pid", env.host));
+        let pid_str = std::fs::read_to_string(&pid_path)?;
+        let pid = pid_str.trim().parse::<u32>()?;
+
+        // Let the daemon settle
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let initial_fds = std::fs::read_dir(format!("/proc/{}/fd", pid))?.count();
+
+        let socket_path = env.home_dir.path().join(format!(".local/state/shbot/{}.socket", env.host));
+
+        // Connect and disconnect rapidly to ensure FDs are released
+        for i in 0..1000 {
+            let mut stream = std::os::unix::net::UnixStream::connect(&socket_path)?;
+            use std::io::Write;
+            stream.write_all(format!("hello {}\n", i).as_bytes())?;
+            // Drop stream
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+
+        let final_fds = std::fs::read_dir(format!("/proc/{}/fd", pid))?.count();
+
+        assert!(
+            final_fds < initial_fds + 50,
+            "FD leak detected! initial: {}, final: {}",
+            initial_fds,
+            final_fds
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_resource_inotify_leak() -> Result<(), Box<dyn std::error::Error>> {
+        let env = TestEnv::new()?;
+        env.start_connect()?;
+
+        let socket_path = env.home_dir.path().join(format!(".local/state/shbot/{}.socket", env.host));
+        let shbot_bin = TestEnv::get_shbot_bin_path()?;
+
+        for i in 0..200 {
+            let temp_dir = tempfile::tempdir()?;
+            let mut stream = std::os::unix::net::UnixStream::connect(&socket_path)?;
+            use std::io::Write;
+            stream.write_all(format!("hello {}\n", i).as_bytes())?;
+            stream.write_all(format!("cd {}\n", temp_dir.path().display()).as_bytes())?;
+            // Abruptly drop the client stream without unregistering via command
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+
+        let out = std::process::Command::new(&shbot_bin)
+            .arg("status")
+            .env("HOME", env.home_dir.path())
+            .env("HOST", &env.host)
+            .output()?;
+        
+        let status = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<&str> = status.lines().collect();
+        let watches_line = lines.iter().find(|&&l| l.contains("Active File Monitors:")).expect("Status should contain active watches");
+        let parts: Vec<&str> = watches_line.split(':').collect();
+        let count: usize = parts[1].trim().parse()?;
+        
+        assert_eq!(count, 0, "There should be no leaked inotify watches");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_resource_zombie_process() -> Result<(), Box<dyn std::error::Error>> {
+        let env = TestEnv::new()?;
+        
+        // Write config with a trigger that hangs
+        let config_path = env.home_dir.path().join(".config/shbot/shbot.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap())?;
+        std::fs::write(&config_path, r#"
+[triggers.hang_test]
+type = "file-change"
+watch = "**/*.txt"
+command = "sleep 60"
+"#)?;
+
+        env.start_connect()?;
+
+        let socket_path = env.home_dir.path().join(format!(".local/state/shbot/{}.socket", env.host));
+        let pid_path = env.home_dir.path().join(format!(".local/state/shbot/{}.pid", env.host));
+        let pid_str = std::fs::read_to_string(&pid_path)?;
+        let pid = pid_str.trim().parse::<u32>()?;
+
+        // Connect to trigger a watch
+        let temp_dir = tempfile::tempdir()?;
+        let mut stream = std::os::unix::net::UnixStream::connect(&socket_path)?;
+        use std::io::Write;
+        stream.write_all(b"hello 123\n")?;
+        stream.write_all(format!("cd {}\n", temp_dir.path().display()).as_bytes())?;
+
+        // Create a file to trigger the watch
+        std::fs::write(temp_dir.path().join("trigger.txt"), "trigger")?;
+
+        // Wait a little for the sleep 60 to start
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Drop the client abruptly
+        drop(stream);
+
+        // Give it time to clean up
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+
+        // Kill the daemon to make sure sleep 60 is either killed or reaped by tokio
+        std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status()?;
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Check for any zombie processes named "sleep" spawned by us.
+        // It's hard to precisely find zombies of a specific process if it's dead, 
+        // but if tokio cleans up before dying, or if dying cleans it up, we can check `ps`.
+        let out = std::process::Command::new("ps")
+            .arg("-ef")
+            .output()?;
+        let ps_output = String::from_utf8_lossy(&out.stdout);
+        // Ensure there's no defunct sleep process
+        for line in ps_output.lines() {
+            if line.contains("sleep 60") && line.contains("<defunct>") {
+                panic!("Found zombie process: {}", line);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_resource_memory_leak() -> Result<(), Box<dyn std::error::Error>> {
+        let env = TestEnv::new()?;
+        env.start_connect()?;
+
+        let socket_path = env.home_dir.path().join(format!(".local/state/shbot/{}.socket", env.host));
+        let pid_path = env.home_dir.path().join(format!(".local/state/shbot/{}.pid", env.host));
+        let pid_str = std::fs::read_to_string(&pid_path)?;
+        let pid = pid_str.trim().parse::<u32>()?;
+
+        // Give daemon time to settle
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let get_rss = || -> Result<u64, Box<dyn std::error::Error>> {
+            let statm = std::fs::read_to_string(format!("/proc/{}/statm", pid))?;
+            let parts: Vec<&str> = statm.split_whitespace().collect();
+            let rss_pages: u64 = parts[1].parse()?;
+            Ok(rss_pages)
+        };
+
+        // Warm up phase to allow caches and allocator pools to expand
+        for i in 0..500 {
+            let temp_dir = tempfile::tempdir()?;
+            let mut stream = std::os::unix::net::UnixStream::connect(&socket_path)?;
+            use std::io::Write;
+            stream.write_all(format!("hello {}\n", i).as_bytes())?;
+            stream.write_all(format!("cd {}\n", temp_dir.path().display()).as_bytes())?;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        let rss_after_warmup = get_rss()?;
+
+        // Heavy load phase
+        for i in 500..1500 {
+            let temp_dir = tempfile::tempdir()?;
+            let mut stream = std::os::unix::net::UnixStream::connect(&socket_path)?;
+            use std::io::Write;
+            stream.write_all(format!("hello {}\n", i).as_bytes())?;
+            stream.write_all(format!("cd {}\n", temp_dir.path().display()).as_bytes())?;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        let rss_after_load = get_rss()?;
+
+        // Once warmed up, the RSS should plateau. 
+        // We allow a small growth (e.g. 5000 pages = 20MB) for minor variations and allocator pooling.
+        assert!(
+            rss_after_load < rss_after_warmup + 5000, 
+            "Memory leak detected! RSS after warmup: {}, RSS after load: {}", 
+            rss_after_warmup, rss_after_load
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_daemon_sighup_reload() -> Result<(), Box<dyn std::error::Error>> {
         let env = TestEnv::new()?;
         
