@@ -1,0 +1,42 @@
+[tools]
+rust = "latest"
+shfmt = "3.7.0"
+dprint = "0.45.0"
+"cargo:cargo-llvm-cov" = "latest"
+"cargo:cargo-binstall" = "latest"
+
+[tasks.fmt]
+description = "Format Rust, Zsh scripts, and Markdown"
+run = """
+#!/usr/bin/env bash
+set -e
+echo "==> Formatting Rust"
+cd daemon && cargo fmt
+cd ..
+
+echo "==> Formatting Zsh Scripts"
+shfmt -w -ln bash zsh/*.zsh
+
+echo "==> Formatting Markdown"
+dprint fmt
+
+echo "==> Formatting Complete!"
+"""
+
+[tasks.coverage]
+description = "Run test suite with llvm-cov coverage instrumentation"
+env = { SHBOT_BIN_PATH = "{{cwd}}/target/llvm-cov-target/debug/shbot" }
+run = """
+#!/usr/bin/env bash
+set -e
+echo "==> Building instrumented daemon binary..."
+cargo llvm-cov run --bin shbot -- --help >/dev/null 2>&1 || true
+
+echo "==> Running test suite with llvm-cov coverage instrumentation..."
+cargo llvm-cov --no-clean --workspace --html
+
+echo "==> Coverage HTML report generated in target/llvm-cov/html/index.html"
+echo ""
+echo "==> Coverage Summary:"
+cargo llvm-cov report
+"""

@@ -55,10 +55,10 @@ project's goals.
   environment variables, you must use the `temp-env` crate to prevent
   process-wide data races.
 - **Formatting**: ALWAYS ensure that all files (Rust, Zsh, and Markdown) are
-  correctly formatted before landing any changes or proposing PRs. To quickly
-  format the entire repository simply run `./scripts/fmt.sh` from the repository
-  root. It will automatically download required formatters (`shfmt` and
-  `dprint`) if they are not globally installed.
+  correctly formatted before landing any changes or proposing PRs. This project
+  uses `mise` to manage tool dependencies. To quickly format the entire
+  repository simply run `mise run fmt` from the repository root. `mise` will
+  automatically download the required pinned formatters (`shfmt` and `dprint`).
 - **Code Style**: When importing types or functions from within the crate,
   always pull them into scope via `use` statements. Do not use inline `crate::`
   paths (e.g., `crate::error::Result`) anywhere in the code except within `use`

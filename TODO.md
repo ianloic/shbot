@@ -9,6 +9,9 @@ required to make `shbot` production-ready.
       suite to remove `tokio::time::sleep` calls. Implement a deterministic,
       event-driven signaling mechanism using `tokio` channels to ensure test
       reliability and eliminate race conditions.
+- [x] **Migrate Tooling to `mise`**: Replace manual script downloads with a
+      `mise.toml` definition, implementing `fmt` and `coverage` as native `mise`
+      tasks for better environment reproducibility.
 
 ## Test Coverage Gaps
 

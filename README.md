@@ -224,6 +224,18 @@ The array indices map exactly to the standard `gitstatus` plugin variables:
 
 ---
 
+## Development
+
+This project uses [`mise`](https://mise.jdx.dev/) to manage development toolchains (Rust, `shfmt`, `dprint`) and tasks.
+To get started:
+
+1. Install `mise` following their [documentation](https://mise.jdx.dev/).
+2. Run `mise install` to download the required tools.
+3. Run `mise run fmt` to format the codebase.
+4. Run `mise run coverage` to generate a test coverage report.
+
+---
+
 ## License
 
 `shbot` is licensed under the GPL-3.0-or-later license. See the
