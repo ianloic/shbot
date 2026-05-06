@@ -31,8 +31,9 @@ reflect the current functionality.
 Additionally, the project backlog is maintained in `TODO.md` in the root of the
 repository. **As you complete items from the backlog or discover new
 improvements that need to be made, you must keep `TODO.md` up to date.** Mark
-completed tasks and append any new architectural or technical debt items you
-find.
+completed tasks using markdown check-boxes (`- [x]`). When adding new ideas or
+technical debt items, check in with the user first to ensure they align with the
+project's goals.
 
 ## 3. Development Guidelines
 
