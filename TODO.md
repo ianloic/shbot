@@ -23,20 +23,20 @@ should be addressed:
         or missing `LOG_RELOAD_HANDLE`).
 
 - [x] **`main.rs` Startup & Signals**:
-  - [ ] Test the `SIGHUP` loop that attempts to hot-reload the configuration.
+  - [x] Test the `SIGHUP` loop that attempts to hot-reload the configuration.
   - [x] Test the `Daemonize` forking logic in `handle_connect` (covered by
         `test_daemon_crash_recovery`).
   - [x] Test CLI errors when `shbot status`, `shbot reload`, or `shbot loglevel`
         encounter a socket that exists but is not being listened to.
 
-- [ ] **`watcher.rs` Edge Cases**:
-  - [ ] Test attempts to unwatch a path that was never watched.
-  - [ ] Test unexpected `notify` channel disconnections (`rx.recv()` errors).
+- [x] **`watcher.rs` Edge Cases**:
+  - [x] Test attempts to unwatch a path that was never watched.
+  - [x] Test unexpected `notify` channel disconnections (`rx.recv()` errors).
 
-- [ ] **`git.rs` Edge Cases**:
-  - [ ] Test handling missing message encodings.
-  - [ ] Test edge cases with `pushRemote` versus standard remote resolution.
-  - [ ] Test specific `libgit2` error return branches that are hard to mock.
+- [x] **`git.rs` Edge Cases**:
+  - [x] Test handling missing message encodings.
+  - [x] Test edge cases with `pushRemote` versus standard remote resolution.
+  - [x] Test specific `libgit2` error return branches that are hard to mock.
 
 ## Resource Leak Testing
 

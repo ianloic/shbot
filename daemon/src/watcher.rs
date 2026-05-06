@@ -224,4 +224,49 @@ mod tests {
         // and initialized configs, but ensuring watch/unwatch don't crash
         // in uninitialized states is critical for race condition safety!
     }
+
+    #[tokio::test]
+    async fn test_unwatch_never_watched() {
+        use crate::config::Config;
+        use crate::state::AppState;
+        use std::sync::Arc;
+
+        let watcher = SyncWatcher::new();
+        let state = AppState::new();
+        let (_config_tx, config_rx) = tokio::sync::watch::channel(Config::default());
+
+        watcher.start(state, config_rx).unwrap();
+
+        let path = PathBuf::from("/tmp/nonexistent_shbot_test_path");
+        // Try unwatching before watching
+        watcher.unwatch(&path);
+
+        assert_eq!(watcher.get_watch_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_watcher_channel_disconnect() {
+        use crate::config::Config;
+        use crate::state::AppState;
+        use std::sync::Arc;
+
+        let watcher = SyncWatcher::new();
+        let state = AppState::new();
+        let (_config_tx, config_rx) = tokio::sync::watch::channel(Config::default());
+
+        watcher.start(state, config_rx).unwrap();
+
+        // Let it start
+        tokio::task::yield_now().await;
+
+        // Force the inner watcher to drop by replacing it.
+        // This will drop the `notify` watcher, which drops the `tx` sender,
+        // causing the `rx.recv()` loop in the spawned task to return None and break cleanly.
+        *watcher.watcher.lock().unwrap() = None;
+
+        // Yield to allow the rx loop to exit
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+    }
 }

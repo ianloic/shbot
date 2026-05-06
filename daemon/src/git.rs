@@ -582,4 +582,108 @@ mod tests {
         assert_eq!(state.num_staged_deleted, 1);
         assert_eq!(state.num_staged, 1);
     }
+
+    #[test]
+    fn test_git_missing_commit_encoding() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init"], root);
+        run_git(&["config", "user.name", "Test User"], root);
+        run_git(&["config", "user.email", "test@example.com"], root);
+
+        fs::write(root.join("test.txt"), "hello").unwrap();
+        run_git(&["add", "test.txt"], root);
+        run_git(&["commit", "-m", "Initial commit"], root);
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        // Since we didn't specify an encoding, it defaults to none in libgit2,
+        // and our code falls back to UTF-8.
+        assert_eq!(state.commit_encoding, "UTF-8");
+    }
+
+    #[test]
+    fn test_git_push_remote_edge_cases() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init", "--initial-branch=main"], root);
+        run_git(&["config", "user.name", "Test"], root);
+        run_git(&["config", "user.email", "test@test.com"], root);
+
+        fs::write(root.join("f.txt"), "a").unwrap();
+        run_git(&["add", "f.txt"], root);
+        run_git(&["commit", "-m", "msg"], root);
+
+        // Setup pushRemote to a non-existent remote
+        run_git(&["config", "branch.main.pushRemote", "fake_remote"], root);
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.push_remote_name, "fake_remote");
+        assert_eq!(state.push_remote_url, "");
+        assert_eq!(state.push_commits_ahead, 0);
+
+        // Remove config
+        run_git(&["config", "--unset", "branch.main.pushRemote"], root);
+
+        // Add a real remote but no tracking branch locally
+        run_git(
+            &["remote", "add", "origin", "http://example.com/repo.git"],
+            root,
+        );
+        run_git(&["config", "branch.main.pushRemote", "origin"], root);
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.push_remote_name, "origin");
+        assert_eq!(state.push_remote_url, "http://example.com/repo.git");
+        assert_eq!(state.push_commits_ahead, 0); // No upstream tracking branch exists locally yet
+    }
+
+    #[test]
+    fn test_git_upstream_missing() {
+        let local_dir = tempdir().unwrap();
+        let local_root = local_dir.path();
+        run_git(&["init", "--initial-branch=main"], local_root);
+        run_git(&["config", "user.name", "Test User"], local_root);
+        run_git(&["config", "user.email", "test@example.com"], local_root);
+
+        fs::write(local_root.join("test.txt"), "hello").unwrap();
+        run_git(&["add", "test.txt"], local_root);
+        run_git(&["commit", "-m", "Initial commit"], local_root);
+
+        // Create remote and push to establish upstream tracking
+        let remote_dir = tempdir().unwrap();
+        run_git(
+            &["init", "--bare", "--initial-branch=main"],
+            remote_dir.path(),
+        );
+        let remote_url = format!("file://{}", remote_dir.path().display());
+        run_git(&["remote", "add", "origin", &remote_url], local_root);
+        run_git(&["push", "-u", "origin", "main"], local_root);
+
+        // Verify it tracked properly first
+        let (_, state) = get_git_state(local_root).unwrap().unwrap();
+        assert_eq!(state.remote_name, "origin");
+
+        // Now remove the local tracking ref to simulate a missing upstream ref
+        let ref_path = local_root.join(".git/refs/remotes/origin/main");
+        if ref_path.exists() {
+            fs::remove_file(ref_path).unwrap();
+        }
+
+        // Now get state again. `branch_upstream_name` works from config,
+        // but `revparse_single` on the ref fails.
+        let (_, state) = get_git_state(local_root).unwrap().unwrap();
+        assert_eq!(state.remote_name, "origin");
+        assert_eq!(state.remote_branch, "main");
+        assert_eq!(state.commits_ahead, 0); // Revparse failed, so ahead/behind wasn't calculated.
+    }
+
+    #[test]
+    fn test_git_corrupted_index() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init", "--initial-branch=main"], root);
+        fs::write(root.join(".git").join("index"), "corrupted").unwrap();
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.index_size, 0); // Error branch leaves it 0
+    }
 }

@@ -242,4 +242,50 @@ mod tests {
         
         Ok(())
     }
+    #[test]
+    fn test_daemon_sighup_reload() -> Result<(), Box<dyn std::error::Error>> {
+        let env = TestEnv::new()?;
+        
+        let config_path = env.home_dir.path().join(".config/shbot/shbot.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap())?;
+        std::fs::write(&config_path, "loglevel = \"info\"\n")?;
+        
+        // 1. Start daemon
+        env.start_connect()?;
+        
+        let shbot_bin = TestEnv::get_shbot_bin_path()?;
+        
+        // Verify initial state is running
+        let out_status = std::process::Command::new(&shbot_bin)
+            .arg("status")
+            .env("HOME", env.home_dir.path())
+            .env("HOST", &env.host)
+            .output()?;
+        assert!(out_status.status.success(), "Daemon should be running");
+        
+        // 2. Change config to debug
+        std::fs::write(&config_path, "loglevel = \"debug\"\n")?;
+        
+        let pid_path = env.home_dir.path().join(format!(".local/state/shbot/{}.pid", env.host));
+        let pid_str = std::fs::read_to_string(&pid_path)?;
+        let pid = pid_str.trim().parse::<u32>()?;
+        
+        // 3. Send SIGHUP
+        std::process::Command::new("kill")
+            .arg("-HUP")
+            .arg(pid.to_string())
+            .status()?;
+            
+        // Wait for SIGHUP to be processed
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        
+        // 4. Verify SIGHUP was received in the log
+        let log_path = env.home_dir.path().join(format!(".local/state/shbot/{}.log", env.host));
+        let log_content = std::fs::read_to_string(&log_path).unwrap_or_default();
+        
+        assert!(log_content.contains("Received SIGHUP, reloading configuration"), "SIGHUP should be logged. Log content:\n{}", log_content);
+        
+        let _ = std::process::Command::new("kill").arg("-TERM").arg(pid.to_string()).status();
+        Ok(())
+    }
 }
