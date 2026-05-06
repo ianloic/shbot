@@ -406,18 +406,19 @@ mod tests {
         let (mut client, _server_task, _state, _watcher) = setup_server().await;
 
         let temp_home = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("HOME", temp_home.path());
-        }
-        let config_dir = temp_home.path().join(".config").join("shbot");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("shbot.toml"), "invalid toml syntax = {").unwrap();
 
-        client.write_all(b"reload\n").await.unwrap();
-        client.write_all(b"status\n").await.unwrap(); // Close connection
-        let mut buf = String::new();
-        client.read_to_string(&mut buf).await.unwrap();
-        assert!(buf.contains("error: failed to load config"));
+        temp_env::async_with_vars([("HOME", Some(temp_home.path()))], async {
+            let config_dir = temp_home.path().join(".config").join("shbot");
+            std::fs::create_dir_all(&config_dir).unwrap();
+            std::fs::write(config_dir.join("shbot.toml"), "invalid toml syntax = {").unwrap();
+
+            client.write_all(b"reload\n").await.unwrap();
+            client.write_all(b"status\n").await.unwrap(); // Close connection
+            let mut buf = String::new();
+            client.read_to_string(&mut buf).await.unwrap();
+            assert!(buf.contains("error: failed to load config"));
+        })
+        .await;
     }
 
     #[tokio::test]

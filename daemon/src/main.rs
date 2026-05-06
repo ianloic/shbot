@@ -305,73 +305,72 @@ mod tests {
 
     #[test]
     fn test_get_hostname_from_env() {
-        unsafe {
-            std::env::set_var("HOST", "testhost-1");
-            std::env::remove_var("HOSTNAME");
-        }
-        assert_eq!(get_hostname(), "testhost-1");
+        temp_env::with_vars([("HOST", Some("testhost-1")), ("HOSTNAME", None)], || {
+            assert_eq!(get_hostname(), "testhost-1");
+        });
 
-        unsafe {
-            std::env::remove_var("HOST");
-            std::env::set_var("HOSTNAME", "testhost-2");
-        }
-        assert_eq!(get_hostname(), "testhost-2");
+        temp_env::with_vars([("HOST", None), ("HOSTNAME", Some("testhost-2"))], || {
+            assert_eq!(get_hostname(), "testhost-2");
+        });
     }
 
     #[test]
     fn test_get_socket_path() {
-        unsafe {
-            std::env::set_var("HOME", "/tmp/testhome");
-            std::env::set_var("HOST", "testhost");
-        }
-
-        let path = get_socket_path().unwrap();
-        assert_eq!(
-            path,
-            PathBuf::from("/tmp/testhome/.local/state/shbot/testhost.socket")
+        temp_env::with_vars(
+            [("HOME", Some("/tmp/testhome")), ("HOST", Some("testhost"))],
+            || {
+                let path = get_socket_path().unwrap();
+                assert_eq!(
+                    path,
+                    PathBuf::from("/tmp/testhome/.local/state/shbot/testhost.socket")
+                );
+            },
         );
     }
 
     #[test]
     fn test_handle_commands() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("HOME", dir.path().to_str().unwrap());
-            std::env::set_var("HOST", "testhost");
-        }
+        temp_env::with_vars(
+            [
+                ("HOME", Some(dir.path().to_str().unwrap())),
+                ("HOST", Some("testhost")),
+            ],
+            || {
+                let socket_path = get_socket_path().unwrap();
+                std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
 
-        let socket_path = get_socket_path().unwrap();
-        std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+                // If daemon is not running (socket empty)
+                assert!(handle_status().is_ok());
+                assert!(handle_reload().is_ok());
+                assert!(handle_loglevel("debug").is_ok());
 
-        // If daemon is not running (socket empty)
-        assert!(handle_status().is_ok());
-        assert!(handle_reload().is_ok());
-        assert!(handle_loglevel("debug").is_ok());
+                // Now mock the daemon
+                let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
 
-        // Now mock the daemon
-        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
-
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                if let Ok(mut stream) = stream {
-                    use std::io::{Read, Write};
-                    let mut buf = [0; 1024];
-                    if let Ok(n) = stream.read(&mut buf) {
-                        let req = String::from_utf8_lossy(&buf[..n]);
-                        if req.trim() == "status" {
-                            stream.write_all(b"status ok\n").unwrap();
-                        } else if req.trim() == "reload" {
-                            stream.write_all(b"reload ok\n").unwrap();
-                        } else if req.starts_with("loglevel") {
-                            stream.write_all(b"loglevel ok\n").unwrap();
+                std::thread::spawn(move || {
+                    for stream in listener.incoming() {
+                        if let Ok(mut stream) = stream {
+                            use std::io::{Read, Write};
+                            let mut buf = [0; 1024];
+                            if let Ok(n) = stream.read(&mut buf) {
+                                let req = String::from_utf8_lossy(&buf[..n]);
+                                if req.trim() == "status" {
+                                    stream.write_all(b"status ok\n").unwrap();
+                                } else if req.trim() == "reload" {
+                                    stream.write_all(b"reload ok\n").unwrap();
+                                } else if req.starts_with("loglevel") {
+                                    stream.write_all(b"loglevel ok\n").unwrap();
+                                }
+                            }
                         }
                     }
-                }
-            }
-        });
+                });
 
-        assert!(handle_status().is_ok());
-        assert!(handle_reload().is_ok());
-        assert!(handle_loglevel("debug").is_ok());
+                assert!(handle_status().is_ok());
+                assert!(handle_reload().is_ok());
+                assert!(handle_loglevel("debug").is_ok());
+            },
+        );
     }
 }

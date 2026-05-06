@@ -87,21 +87,16 @@ mod tests {
     fn test_config_default_fallback() {
         // Set HOME to a temporary directory without a config file
         let temp_home = tempdir().unwrap();
-        unsafe {
-            std::env::set_var("HOME", temp_home.path());
-        }
-
-        let config = Config::load().expect("Should fall back to default when no file exists");
-        assert_eq!(config.daemon.idle_timeout_sec, 300);
-        assert!(config.triggers.is_empty());
+        temp_env::with_var("HOME", Some(temp_home.path()), || {
+            let config = Config::load().expect("Should fall back to default when no file exists");
+            assert_eq!(config.daemon.idle_timeout_sec, 300);
+            assert!(config.triggers.is_empty());
+        });
     }
 
     #[test]
     fn test_config_parsing() {
         let temp_home = tempdir().unwrap();
-        unsafe {
-            std::env::set_var("HOME", temp_home.path());
-        }
 
         let config_dir = temp_home.path().join(".config").join("shbot");
         fs::create_dir_all(&config_dir).unwrap();
@@ -128,32 +123,36 @@ command = "git status"
 
         fs::write(config_path, toml_content).unwrap();
 
-        let config = Config::load().expect("Should load the config successfully");
-        assert_eq!(config.daemon.idle_timeout_sec, 600);
-        assert_eq!(config.triggers.len(), 3);
+        temp_env::with_var("HOME", Some(temp_home.path()), || {
+            let config = Config::load().expect("Should load the config successfully");
+            assert_eq!(config.daemon.idle_timeout_sec, 600);
+            assert_eq!(config.triggers.len(), 3);
 
-        if let Some(TriggerConfig::Periodic {
-            interval_sec,
-            command,
-        }) = config.triggers.get("my_periodic")
-        {
-            assert_eq!(*interval_sec, 10);
-            assert_eq!(command, "echo 'hello'");
-        } else {
-            panic!("Expected periodic trigger");
-        }
+            if let Some(TriggerConfig::Periodic {
+                interval_sec,
+                command,
+            }) = config.triggers.get("my_periodic")
+            {
+                assert_eq!(*interval_sec, 10);
+                assert_eq!(command, "echo 'hello'");
+            } else {
+                panic!("Expected periodic trigger");
+            }
 
-        if let Some(TriggerConfig::FileChange { watch, command }) = config.triggers.get("my_file") {
-            assert_eq!(watch, "**/*.rs");
-            assert_eq!(command, "cargo test");
-        } else {
-            panic!("Expected file-change trigger");
-        }
+            if let Some(TriggerConfig::FileChange { watch, command }) =
+                config.triggers.get("my_file")
+            {
+                assert_eq!(watch, "**/*.rs");
+                assert_eq!(command, "cargo test");
+            } else {
+                panic!("Expected file-change trigger");
+            }
 
-        if let Some(TriggerConfig::Explicit { command }) = config.triggers.get("my_explicit") {
-            assert_eq!(command, "git status");
-        } else {
-            panic!("Expected explicit trigger");
-        }
+            if let Some(TriggerConfig::Explicit { command }) = config.triggers.get("my_explicit") {
+                assert_eq!(command, "git status");
+            } else {
+                panic!("Expected explicit trigger");
+            }
+        });
     }
 }

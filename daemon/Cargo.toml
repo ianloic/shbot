@@ -19,4 +19,5 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
+temp-env = { version = "0.3.6", features = ["async_closure"] }
 tempfile = "3.27.0"
