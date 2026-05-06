@@ -47,6 +47,9 @@ find.
   when modifying socket interaction or shell commands. **Crucially, you must
   always add or update integration tests and unit tests when features are added
   or changed. Test coverage numbers should not go down when adding a feature.**
+  **Never use `tokio::time::sleep` in tests to wait for asynchronous
+  conditions.** Always use deterministic synchronization channels (like
+  `AppState::test_events_tx`) to eliminate race conditions and flakiness.
 - **Formatting**: ALWAYS ensure that all files (Rust, Zsh, and Markdown) are
   correctly formatted before landing any changes or proposing PRs. To quickly
   format the entire repository simply run `./scripts/fmt.sh` from the repository
