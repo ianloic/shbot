@@ -25,7 +25,6 @@ mod watcher;
 use crate::error::Result;
 use clap::Parser;
 use cli::{Cli, Commands};
-use daemonize::Daemonize;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -43,7 +42,7 @@ fn main() -> Result<()> {
         }
         Commands::Daemon => {
             info!("Starting shbot daemon");
-            handle_daemon(None)?;
+            handle_daemon()?;
         }
         Commands::Status => {
             if let Err(e) = handle_status() {
@@ -125,7 +124,7 @@ fn handle_loglevel(level: &str) -> Result<()> {
     Ok(())
 }
 
-fn handle_daemon(pre_bound_listener: Option<std::os::unix::net::UnixListener>) -> Result<()> {
+fn handle_daemon() -> Result<()> {
     // Load config
     let config = config::Config::load()?;
     let socket_path = get_socket_path()?;
@@ -183,7 +182,7 @@ fn handle_daemon(pre_bound_listener: Option<std::os::unix::net::UnixListener>) -
             config_tx.clone(),
             watcher.clone(),
             socket_path,
-            pre_bound_listener,
+            None,
         )
         .await
         {
@@ -241,37 +240,29 @@ fn handle_connect() -> Result<()> {
         std::fs::remove_file(&socket_path)?;
     }
 
-    // Bind listener BEFORE forking. Child will inherit this working listener.
-    let listener = std::os::unix::net::UnixListener::bind(&socket_path)?;
-
     let hostname = get_hostname();
-    let pid_file = state_dir.join(format!("{}.pid", hostname));
     let log_file = state_dir.join(format!("{}.log", hostname));
 
     let stdout = std::fs::File::create(&log_file)?;
-    let stderr = std::fs::File::create(&log_file)?;
+    let stderr = stdout.try_clone()?;
 
-    let daemonize = Daemonize::new()
-        .pid_file(&pid_file)
-        .working_directory(&state_dir)
+    std::process::Command::new(std::env::current_exe()?)
+        .arg("daemon")
+        .stdin(std::process::Stdio::null())
         .stdout(stdout)
-        .stderr(stderr);
+        .stderr(stderr)
+        .current_dir(&state_dir)
+        .spawn()?;
 
-    match daemonize.start() {
-        Ok(_) => {
-            // We are now in the child (daemonized) process!
-            // Execute handle_daemon pushing the inherited listener.
-            if let Err(e) = handle_daemon(Some(listener)) {
-                eprintln!("Daemon crashed: {}", e);
-                std::process::exit(1);
-            }
-            std::process::exit(0);
+    // Wait briefly for the daemon to start and bind the socket
+    for _ in 0..50 {
+        if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+            break;
         }
-        Err(e) => {
-            eprintln!("Failed to run daemonize: {}", e);
-            std::process::exit(1);
-        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
+
+    Ok(())
 }
 
 fn get_hostname() -> String {
