@@ -65,11 +65,18 @@ impl TestEnv {
     pub fn start_daemon(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let shbot_bin = Self::get_shbot_bin_path()?;
 
+        let log_path = self.home_dir.path().join(format!(".local/state/shbot/{}.log", self.host));
+        std::fs::create_dir_all(log_path.parent().unwrap())?;
+        let log_file = std::fs::File::create(&log_path)?;
+        let log_file_err = log_file.try_clone()?;
+
         let daemon_cmd = Command::new(shbot_bin)
             .arg("daemon")
             .env("HOME", self.home_dir.path())
             .env("HOST", &self.host)
             .env("RUST_LOG", "debug")
+            .stdout(log_file)
+            .stderr(log_file_err)
             .spawn()?;
 
         self.daemon_cmd = Some(daemon_cmd);

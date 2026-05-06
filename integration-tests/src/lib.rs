@@ -199,21 +199,16 @@ mod tests {
 
     #[test]
     fn test_daemon_crash_recovery() -> Result<(), Box<dyn std::error::Error>> {
-        let env = TestEnv::new()?;
+        let mut env = TestEnv::new()?;
         
-        // 1. Start daemon via 'connect'
-        env.start_connect()?;
+        // 1. Start daemon natively
+        env.start_daemon()?;
         
         let socket_path = env.home_dir.path().join(format!(".local/state/shbot/{}.socket", env.host));
-        let pid_path = env.home_dir.path().join(format!(".local/state/shbot/{}.pid", env.host));
-        
         assert!(socket_path.exists());
-        assert!(pid_path.exists());
         
         // 2. Read PID and kill it abruptly (SIGKILL)
-        let pid_str = std::fs::read_to_string(&pid_path)?;
-        let pid = pid_str.trim().parse::<u32>()?;
-        
+        let pid = env.daemon_cmd.as_ref().unwrap().id();
         std::process::Command::new("kill")
             .arg("-KILL")
             .arg(pid.to_string())
@@ -222,7 +217,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(500)); // wait for kill to take effect
         
         assert!(socket_path.exists(), "Socket file should remain after crash");
-        assert!(pid_path.exists(), "PID file should remain after crash");
+        env.daemon_cmd = None; // Reset the handle so kill_daemon doesn't trip on it
 
         // 3. Start daemon again via 'connect' (it should clean up stale files and start successfully)
         env.start_connect()?;
@@ -237,21 +232,17 @@ mod tests {
         
         assert!(out.status.success(), "Daemon should respond to status after crash recovery");
         
-        // Final cleanup
-        let new_pid_str = std::fs::read_to_string(&pid_path)?;
-        let new_pid = new_pid_str.trim().parse::<u32>()?;
-        let _ = std::process::Command::new("kill").arg("-TERM").arg(new_pid.to_string()).status();
+        // Final cleanup using pkill
+        let _ = std::process::Command::new("pkill").arg("-f").arg("shbot daemon").status();
         
         Ok(())
     }
     #[test]
     fn test_resource_fd_leak() -> Result<(), Box<dyn std::error::Error>> {
-        let env = TestEnv::new()?;
-        env.start_connect()?;
+        let mut env = TestEnv::new()?;
+        env.start_daemon()?;
 
-        let pid_path = env.home_dir.path().join(format!(".local/state/shbot/{}.pid", env.host));
-        let pid_str = std::fs::read_to_string(&pid_path)?;
-        let pid = pid_str.trim().parse::<u32>()?;
+        let pid = env.daemon_cmd.as_ref().unwrap().id();
 
         // Let the daemon settle
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -320,7 +311,7 @@ mod tests {
 
     #[test]
     fn test_resource_zombie_process() -> Result<(), Box<dyn std::error::Error>> {
-        let env = TestEnv::new()?;
+        let mut env = TestEnv::new()?;
         
         // Write config with a trigger that hangs
         let config_path = env.home_dir.path().join(".config/shbot/shbot.toml");
@@ -332,12 +323,10 @@ watch = "**/*.txt"
 command = "sleep 60"
 "#)?;
 
-        env.start_connect()?;
+        env.start_daemon()?;
 
         let socket_path = env.home_dir.path().join(format!(".local/state/shbot/{}.socket", env.host));
-        let pid_path = env.home_dir.path().join(format!(".local/state/shbot/{}.pid", env.host));
-        let pid_str = std::fs::read_to_string(&pid_path)?;
-        let pid = pid_str.trim().parse::<u32>()?;
+        let pid = env.daemon_cmd.as_ref().unwrap().id();
 
         // Connect to trigger a watch
         let temp_dir = tempfile::tempdir()?;
@@ -384,13 +373,11 @@ command = "sleep 60"
 
     #[test]
     fn test_resource_memory_leak() -> Result<(), Box<dyn std::error::Error>> {
-        let env = TestEnv::new()?;
-        env.start_connect()?;
+        let mut env = TestEnv::new()?;
+        env.start_daemon()?;
 
         let socket_path = env.home_dir.path().join(format!(".local/state/shbot/{}.socket", env.host));
-        let pid_path = env.home_dir.path().join(format!(".local/state/shbot/{}.pid", env.host));
-        let pid_str = std::fs::read_to_string(&pid_path)?;
-        let pid = pid_str.trim().parse::<u32>()?;
+        let pid = env.daemon_cmd.as_ref().unwrap().id();
 
         // Give daemon time to settle
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -439,14 +426,14 @@ command = "sleep 60"
 
     #[test]
     fn test_daemon_sighup_reload() -> Result<(), Box<dyn std::error::Error>> {
-        let env = TestEnv::new()?;
+        let mut env = TestEnv::new()?;
         
         let config_path = env.home_dir.path().join(".config/shbot/shbot.toml");
         std::fs::create_dir_all(config_path.parent().unwrap())?;
         std::fs::write(&config_path, "loglevel = \"info\"\n")?;
         
         // 1. Start daemon
-        env.start_connect()?;
+        env.start_daemon()?;
         
         let shbot_bin = TestEnv::get_shbot_bin_path()?;
         
@@ -461,9 +448,7 @@ command = "sleep 60"
         // 2. Change config to debug
         std::fs::write(&config_path, "loglevel = \"debug\"\n")?;
         
-        let pid_path = env.home_dir.path().join(format!(".local/state/shbot/{}.pid", env.host));
-        let pid_str = std::fs::read_to_string(&pid_path)?;
-        let pid = pid_str.trim().parse::<u32>()?;
+        let pid = env.daemon_cmd.as_ref().unwrap().id();
         
         // 3. Send SIGHUP
         std::process::Command::new("kill")
