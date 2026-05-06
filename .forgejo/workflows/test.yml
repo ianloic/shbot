@@ -15,8 +15,8 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y zsh
+          apt-get update
+          apt-get install -y zsh
 
       - name: Install mise and toolchains
         uses: https://github.com/jdx/mise-action@v2
