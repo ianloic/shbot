@@ -51,6 +51,9 @@ project's goals.
   **Never use `tokio::time::sleep` in tests to wait for asynchronous
   conditions.** Always use deterministic synchronization channels (like
   `AppState::test_events_tx`) to eliminate race conditions and flakiness.
+  **Never use `unsafe` code.** When writing tests that need to manipulate
+  environment variables, you must use the `temp-env` crate to prevent
+  process-wide data races.
 - **Formatting**: ALWAYS ensure that all files (Rust, Zsh, and Markdown) are
   correctly formatted before landing any changes or proposing PRs. To quickly
   format the entire repository simply run `./scripts/fmt.sh` from the repository
