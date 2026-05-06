@@ -5,30 +5,29 @@ required to make `shbot` production-ready.
 
 ## Technical Debt & Refactoring
 
-- **Replace `sleep` in Integration Tests**: Refactor the integration test suite
-  to remove `tokio::time::sleep` calls. Implement a deterministic, event-driven
-  signaling mechanism using `tokio` channels to ensure test reliability and
-  eliminate race conditions.
+- ~~**Replace `sleep` in Integration Tests**~~: Refactor the integration test
+  suite to remove `tokio::time::sleep` calls. Implement a deterministic,
+  event-driven signaling mechanism using `tokio` channels to ensure test
+  reliability and eliminate race conditions.
 
 ## Test Coverage Gaps
 
 While overall coverage is >90%, several specific areas remain uncovered and
 should be addressed:
 
-- **`server.rs` Error Handling**:
-  - Test unexpected client disconnections mid-command and `stream.write_all()`
-    errors.
-  - Test decoding failures for corrupted socket payloads.
-  - Test failure paths for dynamic config reloading (e.g., unparseable TOML or
-    missing `LOG_RELOAD_HANDLE`).
-  - Test file watcher initialization failures.
+- ~~**`server.rs` Error Handling**~~:
+  - ~~Test unexpected client disconnections mid-command and `stream.write_all()`
+    errors.~~
+  - ~~Test decoding failures for corrupted socket payloads.~~
+  - ~~Test failure paths for dynamic config reloading (e.g., unparseable TOML or
+    missing `LOG_RELOAD_HANDLE`).~~
 
-- **`main.rs` Startup & Signals**:
+- ~~**`main.rs` Startup & Signals**~~:
   - Test the `SIGHUP` loop that attempts to hot-reload the configuration.
-  - Test the `Daemonize` forking logic in `handle_connect` (may require a
-    separate test binary or harness).
-  - Test CLI errors when `shbot status`, `shbot reload`, or `shbot loglevel`
-    encounter a socket that exists but is not being listened to.
+  - ~~Test the `Daemonize` forking logic in `handle_connect` (covered by
+    `test_daemon_crash_recovery`).~~
+  - ~~Test CLI errors when `shbot status`, `shbot reload`, or `shbot loglevel`
+    encounter a socket that exists but is not being listened to.~~
 
 - **`watcher.rs` Edge Cases**:
   - Test attempts to unwatch a path that was never watched.

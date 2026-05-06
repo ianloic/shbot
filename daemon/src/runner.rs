@@ -178,10 +178,11 @@ mod tests {
 
         let (config_tx, config_rx) = watch::channel(config);
 
+        let mut rx = state.test_events_tx.subscribe();
         start_periodic_triggers(state.clone(), config_rx);
 
         // Allow task to spawn and run 1st config
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let _ = rx.recv().await;
 
         // Update config to something else
         let mut new_config = Config::default();
@@ -197,7 +198,8 @@ mod tests {
         assert!(config_tx.send(new_config).is_ok());
 
         // Yield tokio to allow aborts to process
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
 
         // The fact that it doesn't panic and we successfully spawned and
         // aborted the internal tasks indicates the loop processes correctly.
@@ -254,8 +256,10 @@ mod tests {
         let (_config_tx, config_rx) = watch::channel(config);
         start_periodic_triggers(state.clone(), config_rx);
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
-        // Let it run once
+        // Let it run once. Since it fails, it won't broadcast. We can just yield.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
     }
 
     #[tokio::test]
