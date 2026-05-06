@@ -16,7 +16,7 @@ jobs:
       - name: Install system dependencies
         run: |
           apt-get update
-          apt-get install -y zsh
+          apt-get install -y zsh procps
 
       - name: Install mise
         uses: https://github.com/jdx/mise-action@v2

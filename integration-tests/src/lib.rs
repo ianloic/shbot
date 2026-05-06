@@ -129,11 +129,13 @@ mod tests {
         let pre_untracked = pre_untracked_raw
             .replace('\r', "\n")
             .replace('%', "")
+            .replace('#', "")
             .trim()
             .to_string();
         let post_untracked = post_untracked_raw
             .replace('\r', "\n")
             .replace('%', "")
+            .replace('#', "")
             .trim()
             .to_string();
 
