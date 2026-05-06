@@ -301,6 +301,7 @@ pub fn get_socket_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_get_hostname_from_env() {
@@ -323,11 +324,54 @@ mod tests {
             std::env::set_var("HOME", "/tmp/testhome");
             std::env::set_var("HOST", "testhost");
         }
-        
+
         let path = get_socket_path().unwrap();
         assert_eq!(
             path,
             PathBuf::from("/tmp/testhome/.local/state/shbot/testhost.socket")
         );
+    }
+
+    #[test]
+    fn test_handle_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("HOME", dir.path().to_str().unwrap());
+            std::env::set_var("HOST", "testhost");
+        }
+
+        let socket_path = get_socket_path().unwrap();
+        std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+
+        // If daemon is not running (socket empty)
+        assert!(handle_status().is_ok());
+        assert!(handle_reload().is_ok());
+        assert!(handle_loglevel("debug").is_ok());
+
+        // Now mock the daemon
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if let Ok(mut stream) = stream {
+                    use std::io::{Read, Write};
+                    let mut buf = [0; 1024];
+                    if let Ok(n) = stream.read(&mut buf) {
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        if req.trim() == "status" {
+                            stream.write_all(b"status ok\n").unwrap();
+                        } else if req.trim() == "reload" {
+                            stream.write_all(b"reload ok\n").unwrap();
+                        } else if req.starts_with("loglevel") {
+                            stream.write_all(b"loglevel ok\n").unwrap();
+                        }
+                    }
+                }
+            }
+        });
+
+        assert!(handle_status().is_ok());
+        assert!(handle_reload().is_ok());
+        assert!(handle_loglevel("debug").is_ok());
     }
 }

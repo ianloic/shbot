@@ -232,4 +232,72 @@ mod tests {
         // If no panic, we are good. Wait, we can't easily assert the output because state.broadcast_to_cwd
         // sends via internal channel, but we can verify it doesn't crash.
     }
+    #[tokio::test]
+    async fn test_runner_periodic_trigger_failures() {
+        let state = AppState::new();
+        let mut config = Config::default();
+        config.triggers.insert(
+            "test_fail".to_string(),
+            TriggerConfig::Periodic {
+                interval_sec: 1,
+                command: "exit 1".to_string(), // Will cause output.status.success() to be false
+            },
+        );
+        config.triggers.insert(
+            "test_error".to_string(),
+            TriggerConfig::Periodic {
+                interval_sec: 1,
+                command: "/nonexistent_cmd_that_fails_to_spawn_hopefully".to_string(),
+            },
+        );
+
+        let (_config_tx, config_rx) = watch::channel(config);
+        start_periodic_triggers(state.clone(), config_rx);
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+        // Let it run once
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_file_triggers_cwd_not_exists() {
+        let state = AppState::new();
+        let config = Config::default();
+        let path = std::path::PathBuf::from("/this/path/does/not/exist/hopefully");
+        evaluate_file_triggers(&path, &state, &config, None).await;
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_file_triggers_invalid_glob() {
+        let state = AppState::new();
+        let mut config = Config::default();
+        config.triggers.insert(
+            "bad_glob".to_string(),
+            TriggerConfig::FileChange {
+                watch: "[".to_string(), // Invalid glob pattern
+                command: "echo 'hi'".to_string(),
+            },
+        );
+
+        let cwd = tempfile::tempdir().unwrap();
+        let affected = vec![cwd.path().join("test.txt")];
+        evaluate_file_triggers(cwd.path(), &state, &config, Some(&affected)).await;
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_file_triggers_failures() {
+        let state = AppState::new();
+        let mut config = Config::default();
+        config.triggers.insert(
+            "fail_cmd".to_string(),
+            TriggerConfig::FileChange {
+                watch: "*".to_string(),
+                command: "exit 1".to_string(), // status success false
+            },
+        );
+        // This is tricky to force a spawn error with `sh -c`. Usually `sh -c /nonexistent` returns Ok with exit code 127.
+        // We'll just test the exit code 1 path.
+
+        let cwd = tempfile::tempdir().unwrap();
+        evaluate_file_triggers(cwd.path(), &state, &config, None).await;
+    }
 }

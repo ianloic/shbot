@@ -95,7 +95,24 @@ mod tests {
 
         let env_err = std::env::VarError::NotPresent;
         let err2 = ShbotError::EnvVar(env_err);
-        assert_eq!(err2.to_string(), "Environment variable error: environment variable not found");
+        assert_eq!(
+            err2.to_string(),
+            "Environment variable error: environment variable not found"
+        );
+
+        let notify_err = notify::Error::generic("notify error");
+        let err3 = ShbotError::Notify(notify_err);
+        assert_eq!(err3.to_string(), "Watcher Error: notify error");
+
+        let toml_err: toml::de::Error = toml::from_str::<toml::Value>("invalid toml").unwrap_err();
+        let err4 = ShbotError::TomlSerDe(toml_err);
+        assert!(err4.to_string().starts_with("TOML parse error:"));
+
+        let git_err = git2::Error::from_str("git error");
+        let err5 = ShbotError::Git2(git_err);
+        assert_eq!(err5.to_string(), "Git error: git error");
+
+        // We can't easily construct a TracingSub error, so we skip it or mock it if possible
     }
 
     #[test]
@@ -107,9 +124,17 @@ mod tests {
         let env_err = std::env::VarError::NotPresent;
         let err2: ShbotError = env_err.into();
         assert!(matches!(err2, ShbotError::EnvVar(_)));
-        
+
         let git_err = git2::Error::from_str("git error");
         let err3: ShbotError = git_err.into();
         assert!(matches!(err3, ShbotError::Git2(_)));
+
+        let notify_err = notify::Error::generic("notify error");
+        let err4: ShbotError = notify_err.into();
+        assert!(matches!(err4, ShbotError::Notify(_)));
+
+        let toml_err: toml::de::Error = toml::from_str::<toml::Value>("invalid toml").unwrap_err();
+        let err5: ShbotError = toml_err.into();
+        assert!(matches!(err5, ShbotError::TomlSerDe(_)));
     }
 }

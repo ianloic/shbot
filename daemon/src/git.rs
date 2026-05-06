@@ -479,5 +479,107 @@ mod tests {
         let (_, state) = get_git_state(local_root).unwrap().unwrap();
         assert_eq!(state.push_remote_name, "origin");
         assert_eq!(state.push_commits_ahead, 1);
+
+        // test remote.pushDefault
+        run_git(&["config", "--unset", "branch.main.pushRemote"], local_root);
+        run_git(&["config", "remote.pushDefault", "origin"], local_root);
+        let (_, state) = get_git_state(local_root).unwrap().unwrap();
+        assert_eq!(state.push_remote_name, "origin");
+        assert_eq!(state.push_commits_ahead, 1);
+    }
+
+    #[test]
+    fn test_git_bare_repo() {
+        let dir = tempdir().unwrap();
+        run_git(&["init", "--bare"], dir.path());
+        let state = get_git_state(dir.path()).unwrap();
+        assert!(state.is_none());
+    }
+
+    #[test]
+    fn test_git_tag_and_encoding() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init"], root);
+        run_git(&["config", "user.name", "Test User"], root);
+        run_git(&["config", "user.email", "test@example.com"], root);
+        run_git(&["config", "i18n.commitEncoding", "ISO-8859-1"], root);
+
+        fs::write(root.join("test.txt"), "hello").unwrap();
+        run_git(&["add", "test.txt"], root);
+        run_git(&["commit", "-m", "Initial commit"], root);
+
+        // Create an annotated tag
+        run_git(&["tag", "-a", "v1.0", "-m", "Version 1.0"], root);
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.tag, "v1.0");
+        assert_eq!(state.commit_encoding, "ISO-8859-1");
+    }
+
+    #[test]
+    fn test_git_status_conflicted() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init", "--initial-branch=main"], root);
+        run_git(&["config", "user.name", "Test User"], root);
+        run_git(&["config", "user.email", "test@example.com"], root);
+
+        fs::write(root.join("test.txt"), "base").unwrap();
+        run_git(&["add", "test.txt"], root);
+        run_git(&["commit", "-m", "base"], root);
+
+        run_git(&["checkout", "-b", "feature"], root);
+        fs::write(root.join("test.txt"), "feature").unwrap();
+        run_git(&["commit", "-am", "feature"], root);
+
+        run_git(&["checkout", "main"], root);
+        fs::write(root.join("test.txt"), "main").unwrap();
+        run_git(&["commit", "-am", "main"], root);
+
+        // This will cause a conflict
+        let status = Command::new("git")
+            .args(&["merge", "feature"])
+            .current_dir(root)
+            .status()
+            .expect("Failed to execute git");
+        assert!(!status.success()); // Merge should fail due to conflict
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.num_conflicted, 1);
+        assert_eq!(state.action, "merge");
+    }
+
+    #[test]
+    fn test_git_status_rename_delete() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init", "--initial-branch=main"], root);
+        run_git(&["config", "user.name", "Test User"], root);
+        run_git(&["config", "user.email", "test@example.com"], root);
+
+        fs::write(root.join("file1.txt"), "content").unwrap();
+        run_git(&["add", "file1.txt"], root);
+        run_git(&["commit", "-m", "initial"], root);
+
+        // Rename staged
+        run_git(&["mv", "file1.txt", "file2.txt"], root);
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.num_staged, 1); // Rename counts as staged
+
+        run_git(&["commit", "-m", "rename"], root);
+
+        // Delete unstaged
+        fs::remove_file(root.join("file2.txt")).unwrap();
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.num_unstaged_deleted, 1);
+        assert_eq!(state.num_unstaged, 1);
+
+        // Stage the delete
+        run_git(&["add", "file2.txt"], root);
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.num_staged_deleted, 1);
+        assert_eq!(state.num_staged, 1);
     }
 }

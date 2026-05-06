@@ -353,16 +353,24 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
 
-    async fn setup_server() -> (UnixStream, tokio::task::JoinHandle<()>, Arc<AppState>, Arc<SyncWatcher>) {
+    async fn setup_server() -> (
+        UnixStream,
+        tokio::task::JoinHandle<()>,
+        Arc<AppState>,
+        Arc<SyncWatcher>,
+    ) {
         let (client, server) = UnixStream::pair().unwrap();
         let state = AppState::new();
         let watcher = SyncWatcher::new();
         let (config_tx, config_rx) = tokio::sync::watch::channel(Config::default());
 
+        watcher.start(state.clone(), config_rx.clone()).unwrap();
+
         let state_clone = state.clone();
         let watcher_clone = watcher.clone();
         let server_task = tokio::spawn(async move {
-            let _ = handle_connection(server, state_clone, config_rx, config_tx, watcher_clone).await;
+            let _ =
+                handle_connection(server, state_clone, config_rx, config_tx, watcher_clone).await;
         });
 
         (client, server_task, state, watcher)
@@ -396,7 +404,9 @@ mod tests {
         let (mut client, _server_task, _state, _watcher) = setup_server().await;
 
         let temp_home = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HOME", temp_home.path()); }
+        unsafe {
+            std::env::set_var("HOME", temp_home.path());
+        }
         let config_dir = temp_home.path().join(".config").join("shbot");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(config_dir.join("shbot.toml"), "invalid toml syntax = {").unwrap();
@@ -427,12 +437,30 @@ mod tests {
         sync_client(&mut client).await;
 
         state.send_to(12345, "custom", "somedata").await;
-        assert!(state.clients.read().await.get(&12345).unwrap().last_state.contains_key("custom"));
+        assert!(
+            state
+                .clients
+                .read()
+                .await
+                .get(&12345)
+                .unwrap()
+                .last_state
+                .contains_key("custom")
+        );
 
         client.write_all(b"invalidate all\n").await.unwrap();
         sync_client(&mut client).await;
 
-        assert!(!state.clients.read().await.get(&12345).unwrap().last_state.contains_key("custom"));
+        assert!(
+            !state
+                .clients
+                .read()
+                .await
+                .get(&12345)
+                .unwrap()
+                .last_state
+                .contains_key("custom")
+        );
     }
 
     #[tokio::test]
@@ -449,14 +477,90 @@ mod tests {
     async fn test_client_disconnect_unwatches() {
         let (mut client, server_task, state, watcher) = setup_server().await;
 
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path_str = temp_dir.path().to_str().unwrap();
+        let cd_cmd = format!("cd {}\n", path_str);
+
         client.write_all(b"hello 9999\n").await.unwrap();
-        client.write_all(b"cd /tmp\n").await.unwrap();
+        client.write_all(cd_cmd.as_bytes()).await.unwrap();
         sync_client(&mut client).await;
-        
+
         drop(client);
-        let _ = server_task.await; 
+        let _ = server_task.await;
 
         assert!(state.get_cwd(9999).await.is_none());
         assert_eq!(watcher.get_watch_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_server_empty_line_and_invalid_hello() {
+        let (mut client, _server_task, state, _watcher) = setup_server().await;
+
+        // Empty line
+        client.write_all(b"\n").await.unwrap();
+
+        // Invalid hello
+        client.write_all(b"hello notapid\n").await.unwrap();
+        sync_client(&mut client).await;
+
+        assert!(state.clients.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_server_cd_before_hello() {
+        let (mut client, _server_task, state, _watcher) = setup_server().await;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path_str = temp_dir.path().to_str().unwrap();
+        let cd_cmd = format!("cd {}\n", path_str);
+
+        client.write_all(cd_cmd.as_bytes()).await.unwrap();
+        sync_client(&mut client).await;
+
+        assert!(state.clients.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_server_cd_shared_watch_target() {
+        let (mut client1, _server_task1, state, watcher) = setup_server().await;
+        let (mut client2, _server_task2) = {
+            let (c, s) = UnixStream::pair().unwrap();
+            let (tx, rx) = tokio::sync::watch::channel(Config::default());
+            let t = tokio::spawn(handle_connection(s, state.clone(), rx, tx, watcher.clone()));
+            (c, t)
+        };
+
+        let temp_dir1 = tempfile::tempdir().unwrap();
+        let path_str1 = temp_dir1.path().to_str().unwrap();
+        let cd_cmd1 = format!("cd {}\n", path_str1);
+
+        let temp_dir2 = tempfile::tempdir().unwrap();
+        let path_str2 = temp_dir2.path().to_str().unwrap();
+        let cd_cmd2 = format!("cd {}\n", path_str2);
+
+        client1.write_all(b"hello 111\n").await.unwrap();
+        client2.write_all(b"hello 222\n").await.unwrap();
+
+        client1.write_all(cd_cmd1.as_bytes()).await.unwrap();
+        client2.write_all(cd_cmd1.as_bytes()).await.unwrap();
+        sync_client(&mut client1).await;
+        sync_client(&mut client2).await;
+
+        assert_eq!(watcher.get_watch_count(), 1);
+
+        // Disconnect client 1, client 2 still needs temp_dir1
+        drop(client1);
+        // We wait a bit
+        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+
+        // Watcher count should still be 1 because client 2 is alive
+        assert_eq!(watcher.get_watch_count(), 1);
+
+        // cd client 2 away
+        client2.write_all(cd_cmd2.as_bytes()).await.unwrap();
+        sync_client(&mut client2).await;
+
+        // now watcher should have 1 (for temp_dir2), and temp_dir1 should be unwatched
+        assert_eq!(watcher.get_watch_count(), 1);
     }
 }

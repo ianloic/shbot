@@ -266,4 +266,61 @@ mod tests {
             "Payload should be sent again after wildcard invalidation"
         );
     }
+
+    #[tokio::test]
+    async fn test_broadcast_functions() {
+        let state = AppState::new();
+        let (tx1, mut rx1) = mpsc::channel(10);
+        let (tx2, mut rx2) = mpsc::channel(10);
+
+        let path1 = PathBuf::from("/tmp/foo");
+        let path2 = PathBuf::from("/tmp/bar");
+
+        state.add_client(1, path1.clone(), tx1).await;
+        state.add_client(2, path2.clone(), tx2).await;
+
+        // test broadcast
+        state.broadcast("msg1", "data1").await;
+        assert_eq!(rx1.recv().await.unwrap(), "update msg1 data1\n");
+        assert_eq!(rx2.recv().await.unwrap(), "update msg1 data1\n");
+
+        // test broadcast cache hit
+        state.broadcast("msg1", "data1").await;
+        assert!(rx1.try_recv().is_err());
+        assert!(rx2.try_recv().is_err());
+
+        // test broadcast_all
+        state.broadcast_all("msg2", "data2").await;
+        assert_eq!(rx1.recv().await.unwrap(), "update msg2 data2\n");
+        assert_eq!(rx2.recv().await.unwrap(), "update msg2 data2\n");
+
+        // test broadcast_all cache hit
+        state.broadcast_all("msg2", "data2").await;
+        assert!(rx1.try_recv().is_err());
+        assert!(rx2.try_recv().is_err());
+
+        // test broadcast_to_cwd
+        state.broadcast_to_cwd(&path1, "msg3", "data3").await;
+        assert_eq!(rx1.recv().await.unwrap(), "update msg3 data3\n");
+        assert!(rx2.try_recv().is_err());
+
+        // test broadcast_to_cwd cache hit
+        state.broadcast_to_cwd(&path1, "msg3", "data3").await;
+        assert!(rx1.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_status_dump_with_latencies() {
+        let state = AppState::new();
+        state
+            .git_latencies
+            .write()
+            .await
+            .insert(PathBuf::from("/tmp/myrepo"), 1500);
+
+        let dump = state.get_status_dump(2).await;
+        assert!(dump.contains("Git Monitor Latencies:"));
+        assert!(dump.contains("/tmp/myrepo"));
+        assert!(dump.contains("1.5 ms"));
+    }
 }
