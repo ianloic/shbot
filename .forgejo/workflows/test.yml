@@ -19,7 +19,7 @@ jobs:
           apt-get install -y zsh procps
 
       - name: Install mise
-        uses: https://github.com/jdx/mise-action@v4
+        uses: https://github.com/jdx/mise-action@v2
         with:
           install: false
           github_token: ''
