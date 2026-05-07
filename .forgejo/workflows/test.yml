@@ -10,6 +10,11 @@ jobs:
   test:
     runs-on: docker
     steps:
+      - name: debugging things
+        run: |
+          pwd
+          env
+          
       - name: Checkout repository
         uses: https://github.com/actions/checkout@v4
 
@@ -19,7 +24,7 @@ jobs:
           apt-get install -y zsh procps
 
       - name: Install mise
-        uses: https://github.com/jdx/mise-action@v2
+        uses: https://github.com/jdx/mise-action@v4
         with:
           install: false
           github_token: ''
