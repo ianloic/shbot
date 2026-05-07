@@ -10,11 +10,6 @@ jobs:
   test:
     runs-on: docker
     steps:
-      - name: debugging things
-        run: |
-          pwd
-          env
-
       - name: Checkout repository
         uses: https://github.com/actions/checkout@v4
 
