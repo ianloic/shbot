@@ -13,6 +13,12 @@ jobs:
       - name: Checkout repository
         uses: https://github.com/actions/checkout@v4
 
+      - name: Check out environment
+        run: |
+          echo env
+          env
+          
+
       - name: Install system dependencies
         run: |
           apt-get update
