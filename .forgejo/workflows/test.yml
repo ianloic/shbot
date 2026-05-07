@@ -17,7 +17,7 @@ jobs:
         run: |
           echo env
           env
-          
+
 
       - name: Install system dependencies
         run: |
@@ -27,13 +27,13 @@ jobs:
       - name: Install mise
         uses: https://github.com/jdx/mise-action@v2
         with:
-          install: false
+          install: true
           github_token: ''
 
-      - name: Install toolchains
-        run: mise install
-        env:
-          GITHUB_TOKEN: ''
+      # - name: Install toolchains
+      #   run: mise install
+      #   env:
+      #     GITHUB_TOKEN: ''
 
       - name: Check Formatting
         run: |
