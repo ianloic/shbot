@@ -24,16 +24,24 @@ jobs:
           apt-get update
           apt-get install -y zsh procps
 
+      - name: Cache mise
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/mise/installs
+          key: ${{ runner.os }}-mise-${{ hashFiles('.mise.toml', 'mise.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-mise-
+
       - name: Install mise
         uses: https://github.com/jdx/mise-action@v2
         with:
-          install: true
+          install: false
           github_token: ''
 
-      # - name: Install toolchains
-      #   run: mise install
-      #   env:
-      #     GITHUB_TOKEN: ''
+      - name: Install toolchains
+        run: mise install
+        env:
+          GITHUB_TOKEN: ''
 
       - name: Check Formatting
         run: |
