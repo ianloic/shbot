@@ -13,14 +13,61 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use crate::config::{Config, TriggerConfig};
+use crate::config::{Config, StateSource};
 use crate::state::AppState;
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::time::{Duration, sleep};
 use tracing::{error, info};
 
-pub fn start_periodic_triggers(
+pub async fn evaluate_state_source(
+    name: &str,
+    source: &StateSource,
+    cwd: &std::path::Path,
+) -> Option<String> {
+    match source {
+        StateSource::File { file } => {
+            let path = std::path::PathBuf::from(file);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            };
+            match tokio::fs::read_to_string(&path).await {
+                Ok(content) => Some(content.trim().to_string()),
+                Err(e) => {
+                    error!("File source '{}' failed to read {:?}: {}", name, path, e);
+                    None
+                }
+            }
+        }
+        StateSource::Command { command } => {
+            match Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .current_dir(cwd)
+                .output()
+                .await
+            {
+                Ok(output) => {
+                    if output.status.success() {
+                        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        error!("Command source '{}' failed: {}", name, stderr);
+                        None
+                    }
+                }
+                Err(e) => {
+                    error!("Command source '{}' failed to execute: {}", name, e);
+                    None
+                }
+            }
+        }
+    }
+}
+
+pub fn start_timeout_tasks(
     state: Arc<AppState>,
     mut config_rx: tokio::sync::watch::Receiver<Config>,
 ) {
@@ -35,39 +82,27 @@ pub fn start_periodic_triggers(
 
             let config = config_rx.borrow().clone();
 
-            for (name, trigger) in config.triggers {
-                if let TriggerConfig::Periodic {
-                    interval_sec,
-                    command,
-                } = trigger
-                {
+            for (name, state_config) in config.state {
+                if let Some(timeout_sec) = state_config.invalidate.timeout {
                     let name = name.clone();
-                    let interval = Duration::from_secs(interval_sec);
+                    let interval = Duration::from_secs(timeout_sec);
                     let state_clone = state.clone();
+                    let source = state_config.source.clone();
 
                     let handle = tokio::spawn(async move {
                         info!(
-                            "Starting periodic trigger '{}' every {}s",
+                            "Starting timeout task '{}' every {}s",
                             name,
                             interval.as_secs()
                         );
+                        let default_cwd = std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("/"));
                         loop {
                             sleep(interval).await;
-                            match Command::new("sh").arg("-c").arg(&command).output().await {
-                                Ok(output) => {
-                                    if output.status.success() {
-                                        let stdout = String::from_utf8_lossy(&output.stdout)
-                                            .trim()
-                                            .to_string();
-                                        state_clone.broadcast_all(&name, &stdout).await;
-                                    } else {
-                                        let stderr = String::from_utf8_lossy(&output.stderr);
-                                        error!("Periodic trigger '{}' failed: {}", name, stderr);
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("Periodic trigger '{}' failed to execute: {}", name, e);
-                                }
+                            if let Some(stdout) =
+                                evaluate_state_source(&name, &source, &default_cwd).await
+                            {
+                                state_clone.broadcast_all(&name, &stdout).await;
                             }
                         }
                     });
@@ -84,7 +119,7 @@ pub fn start_periodic_triggers(
     });
 }
 
-pub async fn evaluate_file_triggers(
+pub async fn evaluate_watch_tasks(
     cwd: &std::path::Path,
     state: &AppState,
     config: &Config,
@@ -95,12 +130,16 @@ pub async fn evaluate_file_triggers(
         return;
     }
 
-    for (name, trigger) in &config.triggers {
-        if let TriggerConfig::FileChange {
-            watch: watch_pattern,
-            command,
-        } = trigger
-        {
+    for (name, state_config) in &config.state {
+        let watch_pattern = if let Some(w) = &state_config.invalidate.watch {
+            Some(w.as_str())
+        } else if let StateSource::File { file } = &state_config.source {
+            Some(file.as_str())
+        } else {
+            None
+        };
+
+        if let Some(watch_pattern) = watch_pattern {
             let mut matched = false;
 
             if let Some(paths) = affected_paths {
@@ -109,7 +148,7 @@ pub async fn evaluate_file_triggers(
                     Ok(g) => g.compile_matcher(),
                     Err(e) => {
                         error!(
-                            "Invalid glob pattern '{}' for trigger '{}': {}",
+                            "Invalid glob pattern '{}' for state '{}': {}",
                             watch_pattern, name, e
                         );
                         continue;
@@ -117,43 +156,21 @@ pub async fn evaluate_file_triggers(
                 };
 
                 for path in paths {
-                    if let Ok(rel_path) = path.strip_prefix(cwd) {
-                        if glob.is_match(rel_path) {
+                    if let Ok(rel_path) = path.strip_prefix(cwd)
+                        && glob.is_match(rel_path) {
                             matched = true;
                             break;
                         }
-                    }
                 }
             } else {
                 // If affected_paths is None, force execution
                 matched = true;
             }
 
-            if matched {
-                let name = name.clone();
-                let command = command.clone();
-
-                match Command::new("sh")
-                    .arg("-c")
-                    .arg(&command)
-                    .current_dir(cwd)
-                    .output()
-                    .await
-                {
-                    Ok(output) => {
-                        if output.status.success() {
-                            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                            state.broadcast_to_cwd(cwd, &name, &stdout).await;
-                        } else {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            error!("File trigger '{}' failed: {}", name, stderr);
-                        }
-                    }
-                    Err(e) => {
-                        error!("File trigger '{}' failed to execute: {}", name, e);
-                    }
+            if matched
+                && let Some(stdout) = evaluate_state_source(name, &state_config.source, cwd).await {
+                    state.broadcast_to_cwd(cwd, name, &stdout).await;
                 }
-            }
         }
     }
 }
@@ -161,36 +178,46 @@ pub async fn evaluate_file_triggers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, TriggerConfig};
+    use crate::config::{Config, StateConfig, StateInvalidate};
     use tokio::sync::watch;
 
     #[tokio::test]
     async fn test_runner_reloads_on_config_change() {
         let state = AppState::new();
         let mut config = Config::default();
-        config.triggers.insert(
+        config.state.insert(
             "test_1".to_string(),
-            TriggerConfig::Periodic {
-                interval_sec: 1,
-                command: "echo 'first'".to_string(),
+            StateConfig {
+                source: StateSource::Command {
+                    command: "echo 'first'".to_string(),
+                },
+                invalidate: StateInvalidate {
+                    timeout: Some(1),
+                    ..Default::default()
+                },
             },
         );
 
         let (config_tx, config_rx) = watch::channel(config);
 
         let mut rx = state.test_events_tx.subscribe();
-        start_periodic_triggers(state.clone(), config_rx);
+        start_timeout_tasks(state.clone(), config_rx);
 
         // Allow task to spawn and run 1st config
         let _ = rx.recv().await;
 
         // Update config to something else
         let mut new_config = Config::default();
-        new_config.triggers.insert(
+        new_config.state.insert(
             "test_2".to_string(),
-            TriggerConfig::Periodic {
-                interval_sec: 1,
-                command: "echo 'second'".to_string(),
+            StateConfig {
+                source: StateSource::Command {
+                    command: "echo 'second'".to_string(),
+                },
+                invalidate: StateInvalidate {
+                    timeout: Some(1),
+                    ..Default::default()
+                },
             },
         );
 
@@ -206,55 +233,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_evaluate_file_triggers_glob_matching() {
+    async fn test_evaluate_watch_tasks_glob_matching() {
         let state = AppState::new();
         let mut config = Config::default();
-        config.triggers.insert(
+        config.state.insert(
             "rust_files".to_string(),
-            TriggerConfig::FileChange {
-                watch: "**/*.rs".to_string(),
-                command: "echo 'rust'".to_string(),
+            StateConfig {
+                source: StateSource::Command {
+                    command: "echo 'rust'".to_string(),
+                },
+                invalidate: StateInvalidate {
+                    watch: Some("**/*.rs".to_string()),
+                    ..Default::default()
+                },
             },
         );
 
         let cwd = tempfile::tempdir().unwrap();
 
         // No paths means forced evaluation
-        evaluate_file_triggers(cwd.path(), &state, &config, None).await;
-        // Wait a bit for tokio spawn (actually wait it's not spawned, it's awaited inline!)
+        evaluate_watch_tasks(cwd.path(), &state, &config, None).await;
 
         // Let's test with matching path
         let affected_match = vec![cwd.path().join("src/main.rs")];
-        evaluate_file_triggers(cwd.path(), &state, &config, Some(&affected_match)).await;
+        evaluate_watch_tasks(cwd.path(), &state, &config, Some(&affected_match)).await;
 
         // Test with non-matching path
         let affected_nomatch = vec![cwd.path().join("src/main.js")];
-        evaluate_file_triggers(cwd.path(), &state, &config, Some(&affected_nomatch)).await;
-
-        // If no panic, we are good. Wait, we can't easily assert the output because state.broadcast_to_cwd
-        // sends via internal channel, but we can verify it doesn't crash.
+        evaluate_watch_tasks(cwd.path(), &state, &config, Some(&affected_nomatch)).await;
     }
+
     #[tokio::test]
-    async fn test_runner_periodic_trigger_failures() {
+    async fn test_runner_timeout_task_failures() {
         let state = AppState::new();
         let mut config = Config::default();
-        config.triggers.insert(
+        config.state.insert(
             "test_fail".to_string(),
-            TriggerConfig::Periodic {
-                interval_sec: 1,
-                command: "exit 1".to_string(), // Will cause output.status.success() to be false
-            },
-        );
-        config.triggers.insert(
-            "test_error".to_string(),
-            TriggerConfig::Periodic {
-                interval_sec: 1,
-                command: "/nonexistent_cmd_that_fails_to_spawn_hopefully".to_string(),
+            StateConfig {
+                source: StateSource::Command {
+                    command: "exit 1".to_string(),
+                },
+                invalidate: StateInvalidate {
+                    timeout: Some(1),
+                    ..Default::default()
+                },
             },
         );
 
         let (_config_tx, config_rx) = watch::channel(config);
-        start_periodic_triggers(state.clone(), config_rx);
+        start_timeout_tasks(state.clone(), config_rx);
 
         // Let it run once. Since it fails, it won't broadcast. We can just yield.
         for _ in 0..10 {
@@ -263,45 +290,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_evaluate_file_triggers_cwd_not_exists() {
+    async fn test_evaluate_watch_tasks_cwd_not_exists() {
         let state = AppState::new();
         let config = Config::default();
         let path = std::path::PathBuf::from("/this/path/does/not/exist/hopefully");
-        evaluate_file_triggers(&path, &state, &config, None).await;
+        evaluate_watch_tasks(&path, &state, &config, None).await;
     }
 
     #[tokio::test]
-    async fn test_evaluate_file_triggers_invalid_glob() {
+    async fn test_evaluate_watch_tasks_invalid_glob() {
         let state = AppState::new();
         let mut config = Config::default();
-        config.triggers.insert(
+        config.state.insert(
             "bad_glob".to_string(),
-            TriggerConfig::FileChange {
-                watch: "[".to_string(), // Invalid glob pattern
-                command: "echo 'hi'".to_string(),
+            StateConfig {
+                source: StateSource::Command {
+                    command: "echo 'hi'".to_string(),
+                },
+                invalidate: StateInvalidate {
+                    watch: Some("[".to_string()),
+                    ..Default::default()
+                },
             },
         );
 
         let cwd = tempfile::tempdir().unwrap();
         let affected = vec![cwd.path().join("test.txt")];
-        evaluate_file_triggers(cwd.path(), &state, &config, Some(&affected)).await;
+        evaluate_watch_tasks(cwd.path(), &state, &config, Some(&affected)).await;
     }
 
     #[tokio::test]
-    async fn test_evaluate_file_triggers_failures() {
+    async fn test_evaluate_watch_tasks_failures() {
         let state = AppState::new();
         let mut config = Config::default();
-        config.triggers.insert(
+        config.state.insert(
             "fail_cmd".to_string(),
-            TriggerConfig::FileChange {
-                watch: "*".to_string(),
-                command: "exit 1".to_string(), // status success false
+            StateConfig {
+                source: StateSource::Command {
+                    command: "exit 1".to_string(),
+                },
+                invalidate: StateInvalidate {
+                    watch: Some("*".to_string()),
+                    ..Default::default()
+                },
             },
         );
-        // This is tricky to force a spawn error with `sh -c`. Usually `sh -c /nonexistent` returns Ok with exit code 127.
-        // We'll just test the exit code 1 path.
 
         let cwd = tempfile::tempdir().unwrap();
-        evaluate_file_triggers(cwd.path(), &state, &config, None).await;
+        evaluate_watch_tasks(cwd.path(), &state, &config, None).await;
     }
 }

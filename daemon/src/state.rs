@@ -158,7 +158,7 @@ impl AppState {
 
     pub async fn get_status_dump(&self, num_monitors: usize) -> String {
         let clients = self.clients.read().await;
-        let mut dump = format!("shbot daemon status:\n");
+        let mut dump = "shbot daemon status:\n".to_string();
         dump.push_str(&format!("  Clients connected: {}\n", clients.len()));
 
         for (pid, info) in clients.iter() {

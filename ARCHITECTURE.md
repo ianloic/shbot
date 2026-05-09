@@ -2,7 +2,7 @@
 
 This document describes the high-level architecture of `shbot`, a daemon and Zsh
 integration that provides background tasks, asynchronous Git status updates, and
-file-watching triggers directly to your shell without blocking.
+file-watching state updates directly to your shell without blocking.
 
 `shbot` consists of three primary domains: the Rust Daemon, the Zsh Plugin, and
 the Integration Test Harness.
@@ -31,10 +31,10 @@ and broadcasting state updates back to specific shells.
 - **`watcher.rs` (`SyncWatcher`):** Leverages the `notify` crate to hook into
   OS-level filesystem events securely. When a directory tree changes, it
   immediately identifies intersecting CWDs of connected clients and triggers
-  both Git and File Trigger re-evaluations.
+  both Git and File Watch Task re-evaluations.
 - **`runner.rs`:** Handles user-defined `shbot.toml` configurations. Executes
-  background tasks ranging from simple `periodic` recurring actions to targeted
-  `file-change` triggers on specific paths. It securely pushes executed outputs
+  background tasks ranging from simple `timeout` recurring actions to targeted
+  `watch` state invalidations on specific paths. It securely pushes executed outputs
   to matching clients over the socket via `broadcast_to_cwd`.
 - **`git.rs`:** Inspects the current state of a Git repository quickly,
   determining dirty states or pending commits dynamically when a client
@@ -86,7 +86,7 @@ connecting to the `shbot` daemon in the background.
 - **Hooks (`add-zsh-hook`):** Uses Zsh lifecycle hooks to notify the daemon of
   state changes:
   - `chpwd`: When the user uses `cd`, the plugin sends `cd /new/path` to the
-    daemon, instantly triggering specific git re-evaluation or file triggers.
+    daemon, instantly triggering specific git re-evaluation or watch tasks.
   - `zshexit`: Properly cleans up file descriptors and the socket stream when
     the shell exits.
 
@@ -132,8 +132,8 @@ manual debugging.
 - `hello <pid>`: Sent by the shell upon startup to register its unique Process
   ID with the daemon.
 - `cd <path>`: Alerts the daemon that the user has changed directories. This
-  immediately triggers Git state evaluation and any matching file-change
-  triggers for the new directory.
+  immediately triggers Git state evaluation and any matching watch
+  tasks for the new directory.
 - `status`: Sent by the `shbot status` CLI command to request a dump of the
   daemon's internal state. The daemon will respond and then immediately close
   the connection.

@@ -133,14 +133,12 @@ mod tests {
 
         let pre_untracked = pre_untracked_raw
             .replace('\r', "\n")
-            .replace('%', "")
-            .replace('#', "")
+            .replace(['%', '#'], "")
             .trim()
             .to_string();
         let post_untracked = post_untracked_raw
             .replace('\r', "\n")
-            .replace('%', "")
-            .replace('#', "")
+            .replace(['%', '#'], "")
             .trim()
             .to_string();
 
@@ -346,10 +344,9 @@ mod tests {
         let config_path = env.home_dir.path().join(".config/shbot/shbot.toml");
         std::fs::create_dir_all(config_path.parent().unwrap())?;
         std::fs::write(&config_path, r#"
-[triggers.hang_test]
-type = "file-change"
-watch = "**/*.txt"
+[state.hang_test]
 command = "sleep 60"
+watch = "**/*.txt"
 "#)?;
 
         env.start_daemon()?;

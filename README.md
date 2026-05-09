@@ -45,7 +45,7 @@ your shell.
 ### 3. Minimal Configuration (Optional)
 
 `shbot` natively comes with zero-configuration Git status reporting. If you want
-to configure background triggers or file-watchers, create the configuration file
+to configure background state updates or file-watchers, create the configuration file
 at `~/.config/shbot/shbot.toml`:
 
 ```toml
@@ -54,16 +54,14 @@ at `~/.config/shbot/shbot.toml`:
 idle_timeout_sec = 300
 
 # A task that runs in the background every 60 seconds
-[triggers.my_background_task]
-type = "periodic"
-interval_sec = 60
-command = "echo 'Hello World'"
+[state.my_background_task]
+source.command = "echo 'Hello World'"
+invalidate.timeout = 60
 
 # A task that runs whenever files in `src` change (supports glob patterns)
-[triggers.my_watcher]
-type = "file-change"
-watch = "src/**/*.rs"
-command = "cargo check"
+[state.my_watcher]
+source.command = "cargo check"
+invalidate.watch = "src/**/*.rs"
 ```
 
 ---
@@ -78,29 +76,26 @@ blocks:
 - `idle_timeout_sec` (Default: `300`): The number of seconds the background
   daemon should continue running after all active shells have disconnected.
 
-### `[triggers.<name>]`
+### `[state.<name>]`
 
 Define custom automated behaviors. The `<name>` you provide here will be the
 identifier used to access the result in Zsh (e.g., `my_task` populates
 `$SHBOT_STATE[my_task]`).
 
-Types of triggers:
+Types of state updates:
 
 - **Periodic**:
-  - `type`: `"periodic"`
-  - `interval_sec`: Frequency in seconds.
-  - `command`: Shell command to execute. Output will be piped to Zsh.
+  - `source.command`: Shell command to execute. Output will be piped to Zsh.
+  - `invalidate.timeout`: Frequency in seconds.
 - **File Change**:
-  - `type`: `"file-change"`
-  - `watch`: A glob pattern of the paths to monitor for changes (relative to the
+  - `source.command`: Shell command to execute on change.
+  - `invalidate.watch`: A glob pattern of the paths to monitor for changes (relative to the
     shell's Current Working Directory), e.g., `"src/**/*.rs"`.
-  - `command`: Shell command to execute on change.
 - **Explicit**:
-  - `type`: `"explicit"`
-  - `command`: Shell command to execute manually.
+  - `source.command`: Shell command to execute manually.
 
 > **Hot Reloading:** `shbot` dynamically hot-reloads its configuration when the
-> TOML file changes, instantly terminating or applying new trigger intervals
+> TOML file changes, instantly terminating or applying new timeouts
 > without needing to restart active shells. You can also manually trigger a
 > reload by running `shbot reload`.
 
@@ -130,9 +125,9 @@ interaction:
 corresponds to a background task or native module, and triggers a prompt refresh
 (`zle reset-prompt`) automatically upon update.
 
-### Accessing Custom Triggers
+### Accessing Custom State
 
-If you defined `[triggers.my_background_task]` in your configuration whose
+If you defined `[state.my_background_task]` in your configuration whose
 command output was `"Success"`, you can access it in Zsh like so:
 
 ```zsh

@@ -16,7 +16,7 @@
 use crate::config::Config;
 use crate::error::Result;
 use crate::git::get_git_state;
-use crate::runner::evaluate_file_triggers;
+use crate::runner::evaluate_watch_tasks;
 use crate::state::AppState;
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, Watcher};
 use std::collections::HashSet;
@@ -95,7 +95,7 @@ impl SyncWatcher {
                 let config = config_rx.borrow().clone();
                 for cwd in unique_cwds {
                     let git_root = if let Ok(Some((root, _))) = get_git_state(&cwd) {
-                        Some(PathBuf::from(root))
+                        Some(root)
                     } else {
                         None
                     };
@@ -108,7 +108,7 @@ impl SyncWatcher {
                             let match_cwd = dirty_path.starts_with(&cwd);
                             let match_git = git_root
                                 .as_ref()
-                                .map_or(false, |r| dirty_path.starts_with(r));
+                                .is_some_and(|r| dirty_path.starts_with(r));
                             if match_cwd || match_git {
                                 tracing::trace!(
                                     "Event path {:?} matched cwd or git root {:?}",
@@ -135,13 +135,13 @@ impl SyncWatcher {
                                 .broadcast_to_cwd(&cwd, "git", &git_state.to_payload())
                                 .await;
                             state.git_latencies.write().await.insert(
-                                PathBuf::from(root),
+                                root,
                                 start_git.elapsed().as_micros() as u64,
                             );
                         }
 
                         let start_trigger = std::time::Instant::now();
-                        evaluate_file_triggers(&cwd, &state, &config, Some(&affected_paths)).await;
+                        evaluate_watch_tasks(&cwd, &state, &config, Some(&affected_paths)).await;
                         state.last_trigger_refresh_micros.store(
                             start_trigger.elapsed().as_micros() as u64,
                             std::sync::atomic::Ordering::Relaxed,
@@ -229,7 +229,7 @@ mod tests {
     async fn test_unwatch_never_watched() {
         use crate::config::Config;
         use crate::state::AppState;
-        use std::sync::Arc;
+        
 
         let watcher = SyncWatcher::new();
         let state = AppState::new();
@@ -248,7 +248,7 @@ mod tests {
     async fn test_watcher_channel_disconnect() {
         use crate::config::Config;
         use crate::state::AppState;
-        use std::sync::Arc;
+        
 
         let watcher = SyncWatcher::new();
         let state = AppState::new();

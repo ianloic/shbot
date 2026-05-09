@@ -25,7 +25,7 @@ pub struct Config {
     pub daemon: DaemonConfig,
 
     #[serde(default)]
-    pub triggers: HashMap<String, TriggerConfig>,
+    pub state: HashMap<String, StateConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -48,15 +48,32 @@ fn default_idle_timeout() -> u64 {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-#[serde(tag = "type")]
 #[allow(dead_code)]
-pub enum TriggerConfig {
-    #[serde(rename = "periodic")]
-    Periodic { interval_sec: u64, command: String },
-    #[serde(rename = "file-change")]
-    FileChange { watch: String, command: String },
-    #[serde(rename = "explicit")]
-    Explicit { command: String },
+pub struct StateConfig {
+    #[serde(flatten)]
+    pub source: StateSource,
+    #[serde(flatten)]
+    pub invalidate: StateInvalidate,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum StateSource {
+    File { file: String },
+    Command { command: String },
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct StateInvalidate {
+    #[serde(default)]
+    pub watch: Option<String>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub pwd: Option<bool>,
 }
 
 impl Config {
@@ -90,7 +107,7 @@ mod tests {
         temp_env::with_var("HOME", Some(temp_home.path()), || {
             let config = Config::load().expect("Should fall back to default when no file exists");
             assert_eq!(config.daemon.idle_timeout_sec, 300);
-            assert!(config.triggers.is_empty());
+            assert!(config.state.is_empty());
         });
     }
 
@@ -106,19 +123,19 @@ mod tests {
 [daemon]
 idle_timeout_sec = 600
 
-[triggers.my_periodic]
-type = "periodic"
-interval_sec = 10
+[state.my_periodic]
 command = "echo 'hello'"
+timeout = 10
 
-[triggers.my_file]
-type = "file-change"
-watch = "**/*.rs"
+[state.my_file]
 command = "cargo test"
+watch = "**/*.rs"
 
-[triggers.my_explicit]
-type = "explicit"
+[state.my_explicit]
 command = "git status"
+
+[state.my_file_source]
+file = "/etc/os-release"
         "#;
 
         fs::write(config_path, toml_content).unwrap();
@@ -126,32 +143,36 @@ command = "git status"
         temp_env::with_var("HOME", Some(temp_home.path()), || {
             let config = Config::load().expect("Should load the config successfully");
             assert_eq!(config.daemon.idle_timeout_sec, 600);
-            assert_eq!(config.triggers.len(), 3);
+            assert_eq!(config.state.len(), 4);
 
-            if let Some(TriggerConfig::Periodic {
-                interval_sec,
-                command,
-            }) = config.triggers.get("my_periodic")
-            {
-                assert_eq!(*interval_sec, 10);
+            let periodic = config.state.get("my_periodic").expect("Expected periodic state");
+            assert_eq!(periodic.invalidate.timeout, Some(10));
+            if let StateSource::Command { command } = &periodic.source {
                 assert_eq!(command, "echo 'hello'");
             } else {
-                panic!("Expected periodic trigger");
+                panic!("Expected command source");
             }
 
-            if let Some(TriggerConfig::FileChange { watch, command }) =
-                config.triggers.get("my_file")
-            {
-                assert_eq!(watch, "**/*.rs");
+            let file_change = config.state.get("my_file").expect("Expected file-change state");
+            assert_eq!(file_change.invalidate.watch.as_deref(), Some("**/*.rs"));
+            if let StateSource::Command { command } = &file_change.source {
                 assert_eq!(command, "cargo test");
             } else {
-                panic!("Expected file-change trigger");
+                panic!("Expected command source");
             }
 
-            if let Some(TriggerConfig::Explicit { command }) = config.triggers.get("my_explicit") {
+            let explicit = config.state.get("my_explicit").expect("Expected explicit state");
+            if let StateSource::Command { command } = &explicit.source {
                 assert_eq!(command, "git status");
             } else {
-                panic!("Expected explicit trigger");
+                panic!("Expected command source");
+            }
+
+            let file_source = config.state.get("my_file_source").expect("Expected file source state");
+            if let StateSource::File { file } = &file_source.source {
+                assert_eq!(file, "/etc/os-release");
+            } else {
+                panic!("Expected file source");
             }
         });
     }

@@ -16,7 +16,7 @@
 use crate::config::Config;
 use crate::error::Result;
 use crate::git::get_git_state;
-use crate::runner::evaluate_file_triggers;
+use crate::runner::evaluate_watch_tasks;
 use crate::state::{AppState, Pid};
 use crate::watcher::SyncWatcher;
 use listenfd::ListenFd;
@@ -152,7 +152,7 @@ async fn handle_connection(
                     state.update_cwd(pid, path.clone()).await;
 
                     let watch_target = if let Ok(Some((root, _))) = get_git_state(&path) {
-                        PathBuf::from(root)
+                        root
                     } else {
                         path.clone()
                     };
@@ -163,11 +163,11 @@ async fn handle_connection(
                     );
                     watcher.watch(&watch_target);
 
-                    if let Some(old) = old_cwd {
-                        if old != path {
+                    if let Some(old) = old_cwd
+                        && old != path {
                             let old_watch_target = if let Ok(Some((root, _))) = get_git_state(&old)
                             {
-                                PathBuf::from(root)
+                                root
                             } else {
                                 old.clone()
                             };
@@ -178,7 +178,7 @@ async fn handle_connection(
                                 for active in active_cwds {
                                     let active_watch =
                                         if let Ok(Some((root, _))) = get_git_state(&active) {
-                                            PathBuf::from(root)
+                                            root
                                         } else {
                                             active.clone()
                                         };
@@ -202,7 +202,6 @@ async fn handle_connection(
                                 }
                             }
                         }
-                    }
 
                     let start_git = std::time::Instant::now();
                     if let Ok(Some((root, git_state))) = get_git_state(&path) {
@@ -211,14 +210,14 @@ async fn handle_connection(
                             .git_latencies
                             .write()
                             .await
-                            .insert(PathBuf::from(root), start_git.elapsed().as_micros() as u64);
+                            .insert(root, start_git.elapsed().as_micros() as u64);
                     } else {
                         state.send_to(pid, "git", "").await;
                     }
 
                     let config = config_rx.borrow().clone();
                     let start_trigger = std::time::Instant::now();
-                    evaluate_file_triggers(&path, &state, &config, None).await;
+                    evaluate_watch_tasks(&path, &state, &config, None).await;
                     state.last_trigger_refresh_micros.store(
                         start_trigger.elapsed().as_micros() as u64,
                         std::sync::atomic::Ordering::Relaxed,
@@ -303,7 +302,7 @@ async fn handle_connection(
         state.remove_client(pid).await;
         if let Some(old) = old_cwd {
             let old_watch_target = if let Ok(Some((root, _))) = get_git_state(&old) {
-                PathBuf::from(root)
+                root
             } else {
                 old.clone()
             };
@@ -312,7 +311,7 @@ async fn handle_connection(
             let mut keep = false;
             for active in active_cwds {
                 let active_watch = if let Ok(Some((root, _))) = get_git_state(&active) {
-                    PathBuf::from(root)
+                    root
                 } else {
                     active.clone()
                 };
@@ -376,10 +375,7 @@ mod tests {
         (client, server_task, state, watcher)
     }
 
-    async fn sync_client(_client: &mut UnixStream, state: &Arc<AppState>) {
-        let mut rx = state.test_events_tx.subscribe();
-        let _ = rx.recv().await;
-    }
+
 
     #[tokio::test]
     async fn test_server_hello_cd() {
@@ -611,7 +607,7 @@ mod tests {
     async fn test_server_loglevel_success() {
         let (mut client, _server_task, _state, _watcher) = setup_server().await;
 
-        let (filter, handle) = tracing_subscriber::reload::Layer::new(EnvFilter::new("info"));
+        let (_filter, handle) = tracing_subscriber::reload::Layer::new(EnvFilter::new("info"));
         let _ = LOG_RELOAD_HANDLE.set(handle);
 
         client.write_all(b"loglevel debug\n").await.unwrap();
@@ -622,7 +618,7 @@ mod tests {
         // We can't strictly assert the buffer because it contains status, but we know it didn't panic.
 
         // Test invalid log level
-        let (mut client2, _) = UnixStream::pair().unwrap();
+        let (client2, _) = UnixStream::pair().unwrap();
         let _t = tokio::spawn(handle_connection(
             client2,
             _state.clone(),

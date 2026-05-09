@@ -161,15 +161,14 @@ fn handle_daemon() -> Result<()> {
 
         tokio::spawn(async move {
             use tokio::signal::unix::{SignalKind, signal};
-            if let Ok(mut sig_term) = signal(SignalKind::terminate()) {
-                if let Some(_) = sig_term.recv().await {
+            if let Ok(mut sig_term) = signal(SignalKind::terminate())
+                && let Some(_) = sig_term.recv().await {
                     info!("Received SIGTERM, shutting down cleanly to flush coverage");
                     std::process::exit(0);
                 }
-            }
         });
 
-        runner::start_periodic_triggers(state.clone(), config_rx.clone());
+        runner::start_timeout_tasks(state.clone(), config_rx.clone());
 
         let watcher = watcher::SyncWatcher::new();
         if let Err(e) = watcher.start(state.clone(), config_rx.clone()) {
@@ -292,7 +291,7 @@ pub fn get_socket_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    
 
     #[test]
     fn test_get_hostname_from_env() {
@@ -340,19 +339,17 @@ mod tests {
                 let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
 
                 std::thread::spawn(move || {
-                    for stream in listener.incoming() {
-                        if let Ok(mut stream) = stream {
-                            use std::io::{Read, Write};
-                            let mut buf = [0; 1024];
-                            if let Ok(n) = stream.read(&mut buf) {
-                                let req = String::from_utf8_lossy(&buf[..n]);
-                                if req.trim() == "status" {
-                                    stream.write_all(b"status ok\n").unwrap();
-                                } else if req.trim() == "reload" {
-                                    stream.write_all(b"reload ok\n").unwrap();
-                                } else if req.starts_with("loglevel") {
-                                    stream.write_all(b"loglevel ok\n").unwrap();
-                                }
+                    for mut stream in listener.incoming().flatten() {
+                        use std::io::{Read, Write};
+                        let mut buf = [0; 1024];
+                        if let Ok(n) = stream.read(&mut buf) {
+                            let req = String::from_utf8_lossy(&buf[..n]);
+                            if req.trim() == "status" {
+                                stream.write_all(b"status ok\n").unwrap();
+                            } else if req.trim() == "reload" {
+                                stream.write_all(b"reload ok\n").unwrap();
+                            } else if req.starts_with("loglevel") {
+                                stream.write_all(b"loglevel ok\n").unwrap();
                             }
                         }
                     }
