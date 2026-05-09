@@ -48,23 +48,19 @@ mod tests {
         let debug_output = env.send_line("echo FD=$SHBOT_FD")?;
         println!("Zsh printed: {}", debug_output);
 
-        let start_time = std::time::Instant::now();
         let mut stream_opt = None;
-        loop {
+        env.wait_for(1, || {
             match listener.accept() {
                 Ok((s, _)) => {
                     stream_opt = Some(s);
-                    break;
+                    Ok::<bool, Box<dyn std::error::Error>>(true)
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if start_time.elapsed().as_secs() > 1 {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    Ok::<bool, Box<dyn std::error::Error>>(false)
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => Err(e.into()),
             }
-        }
+        })?;
 
         if stream_opt.is_none() {
             println!("Socket accept timed out. Fetching Zsh debug info...");
@@ -88,11 +84,14 @@ mod tests {
         stream.write_all(b"update generic payloadinfo\n")?;
 
         // Give ZLE a moment to wake up, read the socket, and set the variable
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        env.wait_for_mut(2, |env| {
+            let out = env.send_line("echo $SHBOT_STATE[generic]")?;
+            Ok::<bool, Box<dyn std::error::Error>>(out.contains("payloadinfo"))
+        })?;
 
         // Test if Zsh variable is set correctly
-        env.pty.send_line("echo $SHBOT_STATE[generic]")?;
-        env.pty.exp_string("payloadinfo")?;
+        let final_out = env.send_line("echo $SHBOT_STATE[generic]")?;
+        assert!(final_out.contains("payloadinfo"));
 
         Ok(())
     }
@@ -109,20 +108,26 @@ mod tests {
 
         env.source_plugin()?;
 
-        std::thread::sleep(std::time::Duration::from_millis(2000));
-
-        env.pty.send_line("echo RES\"\"ULT_PRE=${VCS_STATUS_NUM_UNTRACKED}")?;
-        env.pty.exp_string("RESULT_PRE=")?;
-        let pre_untracked_raw = env.pty.exp_string("> ")?;
+        let mut pre_untracked_raw = String::new();
+        env.wait_for_mut(5, |env| {
+            env.pty.send_line("echo RES\"\"ULT_PRE=${VCS_STATUS_NUM_UNTRACKED}")?;
+            env.pty.exp_string("RESULT_PRE=")?;
+            pre_untracked_raw = env.pty.exp_string("> ")?;
+            let val = pre_untracked_raw.replace('\r', "\n").split('\n').next().unwrap_or("").trim().to_string();
+            Ok::<bool, Box<dyn std::error::Error>>(val == "0")
+        })?;
 
         env.send_line("touch new_file.txt")?;
 
         // Wait for daemon file watcher to detect, re-eval git, and broadcast
-        std::thread::sleep(std::time::Duration::from_millis(2000));
-
-        env.pty.send_line("echo RES\"\"ULT_POST=${VCS_STATUS_NUM_UNTRACKED}")?;
-        env.pty.exp_string("RESULT_POST=")?;
-        let post_untracked_raw = env.pty.exp_string("> ")?;
+        let mut post_untracked_raw = String::new();
+        env.wait_for_mut(5, |env| {
+            env.pty.send_line("echo RES\"\"ULT_POST=${VCS_STATUS_NUM_UNTRACKED}")?;
+            env.pty.exp_string("RESULT_POST=")?;
+            post_untracked_raw = env.pty.exp_string("> ")?;
+            let val = post_untracked_raw.replace('\r', "\n").split('\n').next().unwrap_or("").trim().to_string();
+            Ok::<bool, Box<dyn std::error::Error>>(val == "1")
+        })?;
 
         env.kill_daemon();
 
@@ -188,11 +193,21 @@ mod tests {
         env.send_line(&format!("cd {}", repo_path.display()))?;
         env.source_plugin()?;
 
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        let log_path = env.home_dir.path().join(format!(".local/state/shbot/{}.log", env.host));
+        env.wait_for(5, || {
+            Ok::<bool, Box<dyn std::error::Error>>(
+                std::fs::read_to_string(&log_path).map(|c| c.contains("Handling cd to")).unwrap_or(false)
+            )
+        })?;
 
         // Test sending 'invalidate' over the socket
         env.send_line(&format!("_shbot_send \"invalidate {}\"", repo_path.display()))?;
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        
+        env.wait_for(5, || {
+            Ok::<bool, Box<dyn std::error::Error>>(
+                std::fs::read_to_string(&log_path).map(|c| c.contains("Invalidate request for:")).unwrap_or(false)
+            )
+        })?;
 
         Ok(())
     }
@@ -214,7 +229,9 @@ mod tests {
             .arg(pid.to_string())
             .status()?;
             
-        std::thread::sleep(std::time::Duration::from_millis(500)); // wait for kill to take effect
+        env.wait_for_mut(5, |env| {
+            Ok::<bool, Box<dyn std::error::Error>>(env.daemon_cmd.as_mut().unwrap().try_wait().unwrap_or(None).is_some())
+        })?;
         
         assert!(socket_path.exists(), "Socket file should remain after crash");
         env.daemon_cmd = None; // Reset the handle so kill_daemon doesn't trip on it
@@ -244,8 +261,13 @@ mod tests {
 
         let pid = env.daemon_cmd.as_ref().unwrap().id();
 
-        // Let the daemon settle
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Let the daemon settle by waiting for log output
+        let log_path = env.home_dir.path().join(format!(".local/state/shbot/{}.log", env.host));
+        env.wait_for(5, || {
+            Ok::<bool, Box<dyn std::error::Error>>(
+                std::fs::read_to_string(&log_path).map(|c| c.contains("listening")).unwrap_or(false)
+            )
+        })?;
 
         let initial_fds = std::fs::read_dir(format!("/proc/{}/fd", pid))?.count();
 
@@ -259,9 +281,11 @@ mod tests {
             // Drop stream
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-
-        let final_fds = std::fs::read_dir(format!("/proc/{}/fd", pid))?.count();
+        let mut final_fds = 0;
+        env.wait_for(5, || {
+            final_fds = std::fs::read_dir(format!("/proc/{}/fd", pid))?.count();
+            Ok::<bool, Box<dyn std::error::Error>>(final_fds < initial_fds + 50)
+        })?;
 
         assert!(
             final_fds < initial_fds + 50,
@@ -275,7 +299,7 @@ mod tests {
 
     #[test]
     fn test_resource_inotify_leak() -> Result<(), Box<dyn std::error::Error>> {
-        let env = TestEnv::new()?;
+        let mut env = TestEnv::new()?;
         env.start_connect()?;
 
         let socket_path = env.home_dir.path().join(format!(".local/state/shbot/{}.socket", env.host));
@@ -290,19 +314,24 @@ mod tests {
             // Abruptly drop the client stream without unregistering via command
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-
-        let out = std::process::Command::new(&shbot_bin)
-            .arg("status")
-            .env("HOME", env.home_dir.path())
-            .env("HOST", &env.host)
-            .output()?;
-        
-        let status = String::from_utf8_lossy(&out.stdout);
-        let lines: Vec<&str> = status.lines().collect();
-        let watches_line = lines.iter().find(|&&l| l.contains("Active File Monitors:")).expect("Status should contain active watches");
-        let parts: Vec<&str> = watches_line.split(':').collect();
-        let count: usize = parts[1].trim().parse()?;
+        let mut count: usize = usize::MAX;
+        env.wait_for_ref(5, |env| {
+            let out = std::process::Command::new(&shbot_bin)
+                .arg("status")
+                .env("HOME", env.home_dir.path())
+                .env("HOST", &env.host)
+                .output()?;
+            let status = String::from_utf8_lossy(&out.stdout);
+            let lines: Vec<&str> = status.lines().collect();
+            if let Some(watches_line) = lines.iter().find(|&&l| l.contains("Active File Monitors:")) {
+                let parts: Vec<&str> = watches_line.split(':').collect();
+                count = parts[1].trim().parse()?;
+                if count == 0 {
+                    return Ok(true);
+                }
+            }
+            Ok::<bool, Box<dyn std::error::Error>>(false)
+        })?;
         
         assert_eq!(count, 0, "There should be no leaked inotify watches");
 
@@ -338,21 +367,31 @@ command = "sleep 60"
         // Create a file to trigger the watch
         std::fs::write(temp_dir.path().join("trigger.txt"), "trigger")?;
 
-        // Wait a little for the sleep 60 to start
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Wait for the sleep 60 to start
+        env.wait_for(5, || {
+            let out = std::process::Command::new("ps").arg("-ef").output()?;
+            let ps_output = String::from_utf8_lossy(&out.stdout);
+            Ok::<bool, Box<dyn std::error::Error>>(ps_output.lines().any(|l| l.contains("sleep 60") && !l.contains("defunct")))
+        })?;
 
         // Drop the client abruptly
         drop(stream);
 
         // Give it time to clean up
-        std::thread::sleep(std::time::Duration::from_millis(1500));
+        env.wait_for(5, || {
+            let out = std::process::Command::new("ps").arg("-ef").output()?;
+            let ps_output = String::from_utf8_lossy(&out.stdout);
+            Ok::<bool, Box<dyn std::error::Error>>(!ps_output.lines().any(|l| l.contains("sleep 60") && !l.contains("defunct")))
+        })?;
 
         // Kill the daemon to make sure sleep 60 is either killed or reaped by tokio
         std::process::Command::new("kill")
             .arg("-TERM")
             .arg(pid.to_string())
             .status()?;
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        env.wait_for_mut(5, |env| {
+            Ok::<bool, Box<dyn std::error::Error>>(env.daemon_cmd.as_mut().unwrap().try_wait().unwrap_or(None).is_some())
+        })?;
 
         // Check for any zombie processes named "sleep" spawned by us.
         // It's hard to precisely find zombies of a specific process if it's dead, 
@@ -379,8 +418,12 @@ command = "sleep 60"
         let socket_path = env.home_dir.path().join(format!(".local/state/shbot/{}.socket", env.host));
         let pid = env.daemon_cmd.as_ref().unwrap().id();
 
-        // Give daemon time to settle
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        let log_path = env.home_dir.path().join(format!(".local/state/shbot/{}.log", env.host));
+        env.wait_for(5, || {
+            Ok::<bool, Box<dyn std::error::Error>>(
+                std::fs::read_to_string(&log_path).map(|c| c.contains("listening")).unwrap_or(false)
+            )
+        })?;
 
         let get_rss = || -> Result<u64, Box<dyn std::error::Error>> {
             let statm = std::fs::read_to_string(format!("/proc/{}/statm", pid))?;
@@ -389,6 +432,7 @@ command = "sleep 60"
             Ok(rss_pages)
         };
 
+        let initial_fds = std::fs::read_dir(format!("/proc/{}/fd", pid))?.count();
         // Warm up phase to allow caches and allocator pools to expand
         for i in 0..500 {
             let temp_dir = tempfile::tempdir()?;
@@ -398,7 +442,10 @@ command = "sleep 60"
             stream.write_all(format!("cd {}\n", temp_dir.path().display()).as_bytes())?;
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(2000));
+        env.wait_for(10, || {
+            let current_fds = std::fs::read_dir(format!("/proc/{}/fd", pid))?.count();
+            Ok::<bool, Box<dyn std::error::Error>>(current_fds < initial_fds + 50)
+        })?;
         let rss_after_warmup = get_rss()?;
 
         // Heavy load phase
@@ -410,7 +457,10 @@ command = "sleep 60"
             stream.write_all(format!("cd {}\n", temp_dir.path().display()).as_bytes())?;
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(2000));
+        env.wait_for(10, || {
+            let current_fds = std::fs::read_dir(format!("/proc/{}/fd", pid))?.count();
+            Ok::<bool, Box<dyn std::error::Error>>(current_fds < initial_fds + 50)
+        })?;
         let rss_after_load = get_rss()?;
 
         // Once warmed up, the RSS should plateau. 
@@ -456,8 +506,13 @@ command = "sleep 60"
             .arg(pid.to_string())
             .status()?;
             
-        // Wait for SIGHUP to be processed
-        std::thread::sleep(std::time::Duration::from_millis(1000));
+        // Wait for SIGHUP to be processed by checking the log
+        let log_path = env.home_dir.path().join(format!(".local/state/shbot/{}.log", env.host));
+        env.wait_for(5, || {
+            Ok::<bool, Box<dyn std::error::Error>>(
+                std::fs::read_to_string(&log_path).map(|c| c.contains("Received SIGHUP, reloading configuration")).unwrap_or(false)
+            )
+        })?;
         
         // 4. Verify SIGHUP was received in the log
         let log_path = env.home_dir.path().join(format!(".local/state/shbot/{}.log", env.host));

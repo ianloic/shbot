@@ -82,19 +82,16 @@ impl TestEnv {
         self.daemon_cmd = Some(daemon_cmd);
 
         let socket_path = self.home_dir.path().join(format!(".local/state/shbot/{}.socket", self.host));
-        let start = std::time::Instant::now();
-        while !socket_path.exists() {
-            if start.elapsed().as_secs() > 60 {
-                self.kill_daemon();
-                return Err(format!("Daemon socket was not created at {:?}", socket_path).into());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+        self.wait_for(60, || Ok::<bool, Box<dyn std::error::Error>>(socket_path.exists()))?;
+        if !socket_path.exists() {
+            self.kill_daemon();
+            return Err(format!("Daemon socket was not created at {:?}", socket_path).into());
         }
 
         Ok(())
     }
 
-    pub fn start_connect(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn start_connect(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let shbot_bin = Self::get_shbot_bin_path()?;
 
         let status = Command::new(shbot_bin)
@@ -109,12 +106,9 @@ impl TestEnv {
         }
 
         let socket_path = self.home_dir.path().join(format!(".local/state/shbot/{}.socket", self.host));
-        let start = std::time::Instant::now();
-        while !socket_path.exists() {
-            if start.elapsed().as_secs() > 60 {
-                return Err(format!("Daemon socket was not created at {:?}", socket_path).into());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+        self.wait_for(60, || Ok::<bool, Box<dyn std::error::Error>>(socket_path.exists()))?;
+        if !socket_path.exists() {
+            return Err(format!("Daemon socket was not created at {:?}", socket_path).into());
         }
 
         Ok(())
@@ -177,6 +171,54 @@ impl TestEnv {
         self.pty.send_line(line)?;
         let out = self.pty.exp_string("> ")?;
         Ok(out)
+    }
+
+    pub fn wait_for<F, E>(&self, timeout_secs: u64, mut condition: F) -> Result<(), E>
+    where
+        F: FnMut() -> Result<bool, E>,
+    {
+        let start = std::time::Instant::now();
+        loop {
+            if condition()? {
+                return Ok(());
+            }
+            if start.elapsed().as_secs() > timeout_secs {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    pub fn wait_for_ref<F, E>(&self, timeout_secs: u64, mut condition: F) -> Result<(), E>
+    where
+        F: FnMut(&Self) -> Result<bool, E>,
+    {
+        let start = std::time::Instant::now();
+        loop {
+            if condition(self)? {
+                return Ok(());
+            }
+            if start.elapsed().as_secs() > timeout_secs {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    pub fn wait_for_mut<F, E>(&mut self, timeout_secs: u64, mut condition: F) -> Result<(), E>
+    where
+        F: FnMut(&mut Self) -> Result<bool, E>,
+    {
+        let start = std::time::Instant::now();
+        loop {
+            if condition(self)? {
+                return Ok(());
+            }
+            if start.elapsed().as_secs() > timeout_secs {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }
 
