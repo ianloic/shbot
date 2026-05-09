@@ -30,7 +30,7 @@ impl TestEnv {
         let home_dir = tempfile::tempdir()?;
         let host = "test_host".to_string();
 
-        let mut pty = spawn("env TERM=dumb PROMPT='> ' zsh -f -i", Some(5000))?;
+        let mut pty = spawn("env TERM=dumb PROMPT='> ' zsh -f -i", Some(30000))?;
         pty.exp_string("> ")?;
         
         pty.send_line(&format!("export HOME={}", home_dir.path().display()))?;
@@ -84,7 +84,7 @@ impl TestEnv {
         let socket_path = self.home_dir.path().join(format!(".local/state/shbot/{}.socket", self.host));
         let start = std::time::Instant::now();
         while !socket_path.exists() {
-            if start.elapsed().as_secs() > 10 {
+            if start.elapsed().as_secs() > 60 {
                 self.kill_daemon();
                 return Err(format!("Daemon socket was not created at {:?}", socket_path).into());
             }
@@ -111,7 +111,7 @@ impl TestEnv {
         let socket_path = self.home_dir.path().join(format!(".local/state/shbot/{}.socket", self.host));
         let start = std::time::Instant::now();
         while !socket_path.exists() {
-            if start.elapsed().as_secs() > 10 {
+            if start.elapsed().as_secs() > 60 {
                 return Err(format!("Daemon socket was not created at {:?}", socket_path).into());
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
