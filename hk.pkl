@@ -1,0 +1,29 @@
+amends "package://github.com/jdx/hk/releases/download/v1.45.0/hk@1.45.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v1.45.0/hk@1.45.0#/Builtins.pkl"
+
+local linters = new Mapping<String, Step> {
+    // Add linters here. Examples:
+    // ["prettier"] = Builtins.prettier
+    // ["eslint"] = Builtins.eslint
+    // ["ruff"] = Builtins.ruff
+
+    // Or define custom steps:
+    ["fmt-check"] {
+        check = "mise run fmt-check"
+    }
+}
+
+hooks {
+    ["pre-commit"] {
+        fix = true
+        stash = "git"
+        steps = linters
+    }
+    ["fix"] {
+        fix = true
+        steps = linters
+    }
+    ["check"] {
+        steps = linters
+    }
+}

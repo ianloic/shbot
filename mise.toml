@@ -5,6 +5,7 @@ dprint = "0.45.0"
 "cargo:cargo-llvm-cov" = "latest"
 "cargo:cargo-binstall" = "latest"
 "cargo:forgejo-cli" = "latest"
+hk = "latest"
 
 [tasks.fmt]
 description = "Format Rust, Zsh scripts, and Markdown"
@@ -22,6 +23,24 @@ echo "==> Formatting Markdown"
 dprint fmt
 
 echo "==> Formatting Complete!"
+"""
+
+[tasks.fmt-check]
+description = "Check that Rust, Zsh scripts, and Markdown are correctly formatted"
+run = """
+#!/usr/bin/env bash
+set -e
+echo "==> Checking Rust Formatting"
+cd daemon && cargo fmt --check
+cd ..
+
+echo "==> Checking Zsh Scripts Formatting"
+shfmt -d -ln bash zsh/*.zsh
+
+echo "==> Checking Markdown Formatting"
+dprint check
+
+echo "==> Formatting Check Passed!"
 """
 
 [tasks.coverage]
