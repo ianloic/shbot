@@ -16,6 +16,7 @@
 use crate::config::Config;
 use crate::error::Result;
 use crate::git::get_git_state;
+use crate::protocol::Command;
 use crate::runner::evaluate_watch_tasks;
 use crate::state::{AppState, Pid};
 use crate::watcher::SyncWatcher;
@@ -126,29 +127,22 @@ async fn handle_connection(
             break; // EOF
         }
 
-        let line_trimmed = line.trim_end();
-        if line_trimmed.is_empty() {
+        let Some(command) = Command::parse(&line) else {
             continue;
-        }
+        };
 
-        let mut parts = line_trimmed.splitn(2, ' ');
-        let cmd = parts.next().unwrap_or("");
-        let arg = parts.next().unwrap_or("");
-
-        match cmd {
-            "hello" => {
-                if let Ok(pid) = arg.parse::<Pid>() {
-                    client_pid = Some(pid);
-                    state.add_client(pid, PathBuf::new(), tx.clone()).await;
-                    info!("Client connected: PID {}", pid);
-                } else {
-                    warn!("Invalid hello PID: {}", arg);
-                }
+        match command {
+            Command::Hello(pid) => {
+                client_pid = Some(pid);
+                state.add_client(pid, PathBuf::new(), tx.clone()).await;
+                info!("Client connected: PID {}", pid);
             }
-            "cd" => {
+            Command::InvalidHello(arg) => {
+                warn!("Invalid hello PID: {}", arg);
+            }
+            Command::Cd(path) => {
                 if let Some(pid) = client_pid {
                     let old_cwd = state.get_cwd(pid).await;
-                    let path = PathBuf::from(arg);
                     state.update_cwd(pid, path.clone()).await;
 
                     let watch_target = if let Ok(Some((root, _))) = get_git_state(&path) {
@@ -238,7 +232,7 @@ async fn handle_connection(
                     warn!("Received cd before hello");
                 }
             }
-            "reload" => {
+            Command::Reload => {
                 info!("Reload request received via socket");
                 match Config::load() {
                     Ok(new_config) => {
@@ -260,13 +254,13 @@ async fn handle_connection(
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 break;
             }
-            "invalidate" => {
+            Command::Invalidate(arg) => {
                 info!("Invalidate request for: {}", arg);
-                state.invalidate(arg).await;
+                state.invalidate(&arg).await;
             }
-            "loglevel" => {
+            Command::LogLevel(arg) => {
                 if let Some(handle) = LOG_RELOAD_HANDLE.get() {
-                    match EnvFilter::try_new(arg) {
+                    match EnvFilter::try_new(&arg) {
                         Ok(new_filter) => {
                             if let Err(e) = handle.modify(|filter| *filter = new_filter) {
                                 error!("Failed to update log level: {}", e);
@@ -293,7 +287,7 @@ async fn handle_connection(
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 break;
             }
-            "status" => {
+            Command::Status => {
                 // Send a status dump to this unique connection, then close
                 let dump = state.get_status_dump(watcher.get_watch_count()).await;
                 let _ = tx.try_send(dump);
@@ -302,7 +296,7 @@ async fn handle_connection(
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 break;
             }
-            _ => {
+            Command::Unknown(cmd) => {
                 warn!("Unknown command: {}", cmd);
             }
         }

@@ -17,6 +17,7 @@ mod cli;
 mod config;
 mod error;
 mod git;
+mod protocol;
 mod runner;
 mod server;
 mod state;
