@@ -225,5 +225,12 @@ impl TestEnv {
 impl Drop for TestEnv {
     fn drop(&mut self) {
         self.kill_daemon();
+        // Clean up zsh process
+        let _ = self.pty.send_line("exit");
+        // Force kill any remaining children of this test
+        let _ = std::process::Command::new("pkill")
+            .arg("-P")
+            .arg(std::process::id().to_string())
+            .status();
     }
 }
