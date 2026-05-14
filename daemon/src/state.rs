@@ -209,17 +209,24 @@ impl DaemonState {
         &self,
         target: &PathBuf,
         watcher: &Arc<crate::watcher::SyncWatcher>,
+        config: &crate::config::Config,
     ) {
         let active_cwds = self.get_unique_cwds().await;
         let mut keep = false;
         for active in active_cwds {
-            let active_watch = if let Ok(Some((root, _))) = crate::git::get_git_state(&active) {
-                Some(root)
-            } else {
-                None
-            };
-            if active_watch.as_ref() == Some(target) {
-                keep = true;
+            for (_, state_config) in &config.state {
+                if state_config.invalidate.watch.is_some()
+                    || state_config.invalidate.pwd.unwrap_or(false)
+                {
+                    if let Some(scope_root) = state_config.scope.evaluate(&active) {
+                        if scope_root == *target {
+                            keep = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if keep {
                 break;
             }
         }
@@ -249,17 +256,18 @@ impl DaemonState {
         let old_cwd = self.get_cwd(pid).await;
         self.update_cwd(pid, path.clone()).await;
 
-        let watch_target = if let Ok(Some((root, _))) = crate::git::get_git_state(&path) {
-            Some(root)
-        } else {
-            None
-        };
-        tracing::debug!(
-            "Handling cd to {:?}, evaluating watch target: {:?}",
-            path,
-            watch_target
-        );
-        if let Some(target) = &watch_target {
+        let mut watch_targets = HashSet::new();
+        for (_, state_config) in &config.state {
+            if state_config.invalidate.watch.is_some()
+                || state_config.invalidate.pwd.unwrap_or(false)
+            {
+                if let Some(root) = state_config.scope.evaluate(&path) {
+                    watch_targets.insert(root);
+                }
+            }
+        }
+
+        for target in &watch_targets {
             let watcher_clone = watcher.clone();
             let watch_target_clone = target.clone();
             tokio::task::spawn_blocking(move || {
@@ -269,30 +277,23 @@ impl DaemonState {
 
         if let Some(old) = old_cwd {
             if old != path {
-                let old_watch_target = if let Ok(Some((root, _))) = crate::git::get_git_state(&old)
-                {
-                    Some(root)
-                } else {
-                    None
-                };
+                let mut old_watch_targets = HashSet::new();
+                for (_, state_config) in &config.state {
+                    if state_config.invalidate.watch.is_some()
+                        || state_config.invalidate.pwd.unwrap_or(false)
+                    {
+                        if let Some(root) = state_config.scope.evaluate(&old) {
+                            old_watch_targets.insert(root);
+                        }
+                    }
+                }
 
-                if let Some(old_target) = &old_watch_target {
-                    if old_watch_target != watch_target {
-                        self.check_and_unwatch(old_target, &watcher).await;
+                for old_target in old_watch_targets {
+                    if !watch_targets.contains(&old_target) {
+                        self.check_and_unwatch(&old_target, &watcher, config).await;
                     }
                 }
             }
-        }
-
-        let start_git = std::time::Instant::now();
-        if let Ok(Some((root, git_state))) = crate::git::get_git_state(&path) {
-            self.send_to(pid, "git", &git_state.to_payload()).await;
-            self.git_latencies
-                .write()
-                .await
-                .insert(root, start_git.elapsed().as_micros() as u64);
-        } else {
-            self.send_to(pid, "git", "").await;
         }
 
         let start_trigger = std::time::Instant::now();
@@ -307,18 +308,24 @@ impl DaemonState {
         &self,
         pid: Pid,
         watcher: Arc<crate::watcher::SyncWatcher>,
+        config: &crate::config::Config,
     ) {
         let old_cwd = self.get_cwd(pid).await;
         self.remove_client(pid).await;
         if let Some(old) = old_cwd {
-            let old_watch_target = if let Ok(Some((root, _))) = crate::git::get_git_state(&old) {
-                Some(root)
-            } else {
-                None
-            };
+            let mut old_watch_targets = HashSet::new();
+            for (_, state_config) in &config.state {
+                if state_config.invalidate.watch.is_some()
+                    || state_config.invalidate.pwd.unwrap_or(false)
+                {
+                    if let Some(root) = state_config.scope.evaluate(&old) {
+                        old_watch_targets.insert(root);
+                    }
+                }
+            }
 
-            if let Some(old_target) = &old_watch_target {
-                self.check_and_unwatch(old_target, &watcher).await;
+            for old_target in old_watch_targets {
+                self.check_and_unwatch(&old_target, &watcher, config).await;
             }
         }
     }

@@ -24,6 +24,7 @@ pub async fn evaluate_state_source(
     name: &str,
     source: &StateSource,
     cwd: &std::path::Path,
+    state: &DaemonState,
 ) -> Option<String> {
     match source {
         StateSource::File { file } => {
@@ -64,6 +65,23 @@ pub async fn evaluate_state_source(
                 }
             }
         }
+        StateSource::Native { native } => {
+            if native == "git" {
+                let start_git = std::time::Instant::now();
+                if let Ok(Some((root, git_state))) = crate::git::get_git_state(cwd) {
+                    state
+                        .git_latencies
+                        .write()
+                        .await
+                        .insert(root, start_git.elapsed().as_micros() as u64);
+                    Some(git_state.to_payload())
+                } else {
+                    Some(String::new())
+                }
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -100,7 +118,8 @@ pub fn start_timeout_tasks(
                         loop {
                             sleep(interval).await;
                             if let Some(stdout) =
-                                evaluate_state_source(&name, &source, &default_cwd).await
+                                evaluate_state_source(&name, &source, &default_cwd, &state_clone)
+                                    .await
                             {
                                 state_clone.broadcast_all(&name, &stdout).await;
                             }
@@ -141,6 +160,10 @@ pub async fn evaluate_watch_tasks(
 
         if let Some(watch_pattern) = watch_pattern {
             let mut matched = false;
+            let scope_root = state_config
+                .scope
+                .evaluate(cwd)
+                .unwrap_or_else(|| cwd.to_path_buf());
 
             if let Some(paths) = affected_paths {
                 let builder = globset::GlobBuilder::new(watch_pattern);
@@ -156,7 +179,7 @@ pub async fn evaluate_watch_tasks(
                 };
 
                 for path in paths {
-                    if let Ok(rel_path) = path.strip_prefix(cwd)
+                    if let Ok(rel_path) = path.strip_prefix(&scope_root)
                         && glob.is_match(rel_path)
                     {
                         matched = true;
@@ -169,7 +192,8 @@ pub async fn evaluate_watch_tasks(
             }
 
             if matched
-                && let Some(stdout) = evaluate_state_source(name, &state_config.source, cwd).await
+                && let Some(stdout) =
+                    evaluate_state_source(name, &state_config.source, cwd, state).await
             {
                 state.broadcast_to_cwd(cwd, name, &stdout).await;
             }

@@ -15,7 +15,7 @@
 
 use crate::config::Config;
 use crate::error::Result;
-use crate::git::get_git_state;
+
 use crate::runner::evaluate_watch_tasks;
 use crate::state::DaemonState;
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, Watcher};
@@ -94,23 +94,27 @@ impl SyncWatcher {
                 let unique_cwds = state.get_unique_cwds().await;
                 let config = config_rx.borrow().clone();
                 for cwd in unique_cwds {
-                    let git_root = if let Ok(Some((root, _))) = get_git_state(&cwd) {
-                        Some(root)
-                    } else {
-                        None
-                    };
+                    let mut scope_roots = Vec::new();
+                    for (_, state_config) in &config.state {
+                        if state_config.invalidate.watch.is_some()
+                            || state_config.invalidate.pwd.unwrap_or(false)
+                        {
+                            if let Some(root) = state_config.scope.evaluate(&cwd) {
+                                scope_roots.push(root);
+                            }
+                        }
+                    }
 
                     // Check if ANY dirty path is the cwd itself or a subdirectory of it,
-                    // or within the git_root (if applicable)
+                    // or within any scope root.
                     let affected_paths: Vec<PathBuf> = to_process
                         .iter()
                         .filter(|dirty_path| {
                             let match_cwd = dirty_path.starts_with(&cwd);
-                            let match_git =
-                                git_root.as_ref().is_some_and(|r| dirty_path.starts_with(r));
-                            if match_cwd || match_git {
+                            let match_scope = scope_roots.iter().any(|r| dirty_path.starts_with(r));
+                            if match_cwd || match_scope {
                                 tracing::trace!(
-                                    "Event path {:?} matched cwd or git root {:?}",
+                                    "Event path {:?} matched cwd or scope root {:?}",
                                     dirty_path,
                                     cwd
                                 );
@@ -123,23 +127,6 @@ impl SyncWatcher {
                         .collect();
 
                     if !affected_paths.is_empty() {
-                        tracing::debug!(
-                            "Triggering get_git_state for {:?} due to {} affected paths",
-                            cwd,
-                            affected_paths.len()
-                        );
-                        let start_git = std::time::Instant::now();
-                        if let Ok(Some((root, git_state))) = get_git_state(&cwd) {
-                            state
-                                .broadcast_to_cwd(&cwd, "git", &git_state.to_payload())
-                                .await;
-                            state
-                                .git_latencies
-                                .write()
-                                .await
-                                .insert(root, start_git.elapsed().as_micros() as u64);
-                        }
-
                         let start_trigger = std::time::Instant::now();
                         evaluate_watch_tasks(&cwd, &state, &config, Some(&affected_paths)).await;
                         state.last_trigger_refresh_micros.store(

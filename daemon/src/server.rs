@@ -217,7 +217,10 @@ async fn handle_connection(
 
     if let Some(pid) = client_pid {
         info!("Client disconnected: PID {}", pid);
-        state.handle_client_disconnect(pid, watcher.clone()).await;
+        let config = config_rx.borrow().clone();
+        state
+            .handle_client_disconnect(pid, watcher.clone(), &config)
+            .await;
     }
 
     writer_task.abort();

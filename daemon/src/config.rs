@@ -18,7 +18,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 pub struct Config {
     #[serde(default)]
@@ -63,6 +63,7 @@ pub struct StateConfig {
 pub enum StateSource {
     File { file: String },
     Command { command: String },
+    Native { native: String },
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -86,13 +87,44 @@ impl Config {
             .join("shbot")
             .join("shbot.toml");
 
-        if !config_path.exists() {
-            return Ok(Self::default());
-        }
-
-        let content = std::fs::read_to_string(&config_path)?;
-        let config: Config = toml::from_str(&content)?;
+        let mut config: Config = if !config_path.exists() {
+            Self::default()
+        } else {
+            let content = std::fs::read_to_string(&config_path)?;
+            toml::from_str(&content)?
+        };
+        config.inject_implicit_states();
         Ok(config)
+    }
+
+    pub fn inject_implicit_states(&mut self) {
+        if !self.state.contains_key("git") {
+            self.state.insert(
+                "git".to_string(),
+                StateConfig {
+                    scope: crate::scope::Scope::Nearest(vec![".git".to_string()]),
+                    source: StateSource::Native {
+                        native: "git".to_string(),
+                    },
+                    invalidate: StateInvalidate {
+                        watch: Some("**/*".to_string()),
+                        pwd: Some(true),
+                        ..Default::default()
+                    },
+                },
+            );
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        let mut config = Self {
+            daemon: DaemonConfig::default(),
+            state: HashMap::new(),
+        };
+        config.inject_implicit_states();
+        config
     }
 }
 
@@ -109,7 +141,8 @@ mod tests {
         temp_env::with_var("HOME", Some(temp_home.path()), || {
             let config = Config::load().expect("Should fall back to default when no file exists");
             assert_eq!(config.daemon.idle_timeout_sec, 300);
-            assert!(config.state.is_empty());
+            assert_eq!(config.state.len(), 1);
+            assert!(config.state.contains_key("git"));
         });
     }
 
@@ -145,7 +178,8 @@ file = "/etc/os-release"
         temp_env::with_var("HOME", Some(temp_home.path()), || {
             let config = Config::load().expect("Should load the config successfully");
             assert_eq!(config.daemon.idle_timeout_sec, 600);
-            assert_eq!(config.state.len(), 4);
+            assert_eq!(config.state.len(), 5);
+            assert!(config.state.contains_key("git"));
 
             let periodic = config
                 .state
