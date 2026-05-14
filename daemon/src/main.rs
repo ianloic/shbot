@@ -137,7 +137,7 @@ fn handle_daemon() -> Result<()> {
 
     rt.block_on(async {
         info!("Async runtime initialized!");
-        let state = state::AppState::new();
+        let state = state::DaemonState::new();
 
         let (config_tx, config_rx) = tokio::sync::watch::channel(config);
 

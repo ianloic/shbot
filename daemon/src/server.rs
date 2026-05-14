@@ -12,13 +12,10 @@
 //
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 use crate::config::Config;
 use crate::error::Result;
-use crate::git::get_git_state;
 use crate::protocol::Command;
-use crate::runner::evaluate_watch_tasks;
-use crate::state::{AppState, Pid};
+use crate::state::{DaemonState, Pid};
 use crate::watcher::SyncWatcher;
 use listenfd::ListenFd;
 use std::path::PathBuf;
@@ -32,7 +29,7 @@ pub static LOG_RELOAD_HANDLE: std::sync::OnceLock<Handle<EnvFilter, Registry>> =
     std::sync::OnceLock::new();
 
 pub async fn run_server(
-    state: Arc<AppState>,
+    state: Arc<DaemonState>,
     config_rx: tokio::sync::watch::Receiver<Config>,
     config_tx: tokio::sync::watch::Sender<Config>,
     watcher: Arc<SyncWatcher>,
@@ -90,7 +87,7 @@ pub async fn run_server(
 
 async fn handle_connection(
     stream: UnixStream,
-    state: Arc<AppState>,
+    state: Arc<DaemonState>,
     config_rx: tokio::sync::watch::Receiver<Config>,
     config_tx: tokio::sync::watch::Sender<Config>,
     watcher: Arc<SyncWatcher>,
@@ -142,92 +139,8 @@ async fn handle_connection(
             }
             Command::Cd(path) => {
                 if let Some(pid) = client_pid {
-                    let old_cwd = state.get_cwd(pid).await;
-                    state.update_cwd(pid, path.clone()).await;
-
-                    let watch_target = if let Ok(Some((root, _))) = get_git_state(&path) {
-                        Some(root)
-                    } else {
-                        None
-                    };
-                    tracing::debug!(
-                        "Handling cd to {:?}, evaluating watch target: {:?}",
-                        path,
-                        watch_target
-                    );
-                    if let Some(target) = &watch_target {
-                        let watcher_clone = watcher.clone();
-                        let watch_target_clone = target.clone();
-                        tokio::task::spawn_blocking(move || {
-                            watcher_clone.watch(&watch_target_clone);
-                        });
-                    }
-
-                    if let Some(old) = old_cwd
-                        && old != path
-                    {
-                        let old_watch_target = if let Ok(Some((root, _))) = get_git_state(&old) {
-                            Some(root)
-                        } else {
-                            None
-                        };
-
-                        if old_watch_target != watch_target {
-                            if let Some(old_target) = &old_watch_target {
-                                let active_cwds = state.get_unique_cwds().await;
-                                let mut keep = false;
-                                for active in active_cwds {
-                                    let active_watch =
-                                        if let Ok(Some((root, _))) = get_git_state(&active) {
-                                            Some(root)
-                                        } else {
-                                            None
-                                        };
-                                    if active_watch == old_watch_target {
-                                        keep = true;
-                                        break;
-                                    }
-                                }
-                                if !keep {
-                                    tracing::debug!(
-                                        "Unwatching target {:?} as no active cwds use it",
-                                        old_target
-                                    );
-                                    let watcher_clone = watcher.clone();
-                                    let unwatch_target = old_target.clone();
-                                    tokio::task::spawn_blocking(move || {
-                                        watcher_clone.unwatch(&unwatch_target);
-                                    });
-                                    state.git_latencies.write().await.remove(old_target);
-                                } else {
-                                    tracing::debug!(
-                                        "Keeping watch on target {:?} as it is still used by another active cwd",
-                                        old_target
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    let start_git = std::time::Instant::now();
-                    if let Ok(Some((root, git_state))) = get_git_state(&path) {
-                        state.send_to(pid, "git", &git_state.to_payload()).await;
-                        state
-                            .git_latencies
-                            .write()
-                            .await
-                            .insert(root, start_git.elapsed().as_micros() as u64);
-                    } else {
-                        state.send_to(pid, "git", "").await;
-                    }
-
                     let config = config_rx.borrow().clone();
-                    let start_trigger = std::time::Instant::now();
-                    evaluate_watch_tasks(&path, &state, &config, None).await;
-                    state.last_trigger_refresh_micros.store(
-                        start_trigger.elapsed().as_micros() as u64,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
+                    state.handle_cd(pid, path, watcher.clone(), &config).await;
                 } else {
                     warn!("Received cd before hello");
                 }
@@ -304,50 +217,7 @@ async fn handle_connection(
 
     if let Some(pid) = client_pid {
         info!("Client disconnected: PID {}", pid);
-        let old_cwd = state.get_cwd(pid).await;
-        state.remove_client(pid).await;
-        if let Some(old) = old_cwd {
-            let old_watch_target = if let Ok(Some((root, _))) = get_git_state(&old) {
-                Some(root)
-            } else {
-                None
-            };
-
-            if let Some(old_target) = &old_watch_target {
-                let active_cwds = state.get_unique_cwds().await;
-                let mut keep = false;
-                for active in active_cwds {
-                    let active_watch = if let Ok(Some((root, _))) = get_git_state(&active) {
-                        Some(root)
-                    } else {
-                        None
-                    };
-                    if active_watch == old_watch_target {
-                        keep = true;
-                        break;
-                    }
-                }
-                if !keep {
-                    tracing::debug!(
-                        "Client {} disconnected, unwatching target {:?} as no other clients need it",
-                        pid,
-                        old_target
-                    );
-                    let watcher_clone = watcher.clone();
-                    let unwatch_target = old_target.clone();
-                    tokio::task::spawn_blocking(move || {
-                        watcher_clone.unwatch(&unwatch_target);
-                    });
-                    state.git_latencies.write().await.remove(old_target);
-                } else {
-                    tracing::debug!(
-                        "Client {} disconnected, keeping watch on target {:?} as it is still used by another active cwd",
-                        pid,
-                        old_target
-                    );
-                }
-            }
-        }
+        state.handle_client_disconnect(pid, watcher.clone()).await;
     }
 
     writer_task.abort();
@@ -358,7 +228,7 @@ async fn handle_connection(
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::state::AppState;
+    use crate::state::DaemonState;
     use crate::watcher::SyncWatcher;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -367,11 +237,11 @@ mod tests {
     async fn setup_server() -> (
         UnixStream,
         tokio::task::JoinHandle<()>,
-        Arc<AppState>,
+        Arc<DaemonState>,
         Arc<SyncWatcher>,
     ) {
         let (client, server) = UnixStream::pair().unwrap();
-        let state = AppState::new();
+        let state = DaemonState::new();
         let watcher = SyncWatcher::new();
         let (config_tx, config_rx) = tokio::sync::watch::channel(Config::default());
 

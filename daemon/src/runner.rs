@@ -14,7 +14,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::config::{Config, StateSource};
-use crate::state::AppState;
+use crate::state::DaemonState;
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::time::{Duration, sleep};
@@ -68,7 +68,7 @@ pub async fn evaluate_state_source(
 }
 
 pub fn start_timeout_tasks(
-    state: Arc<AppState>,
+    state: Arc<DaemonState>,
     mut config_rx: tokio::sync::watch::Receiver<Config>,
 ) {
     tokio::spawn(async move {
@@ -121,7 +121,7 @@ pub fn start_timeout_tasks(
 
 pub async fn evaluate_watch_tasks(
     cwd: &std::path::Path,
-    state: &AppState,
+    state: &DaemonState,
     config: &Config,
     affected_paths: Option<&[std::path::PathBuf]>,
 ) {
@@ -185,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_runner_reloads_on_config_change() {
-        let state = AppState::new();
+        let state = DaemonState::new();
         let mut config = Config::default();
         config.state.insert(
             "test_1".to_string(),
@@ -236,7 +236,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_evaluate_watch_tasks_glob_matching() {
-        let state = AppState::new();
+        let state = DaemonState::new();
         let mut config = Config::default();
         config.state.insert(
             "rust_files".to_string(),
@@ -267,7 +267,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_runner_timeout_task_failures() {
-        let state = AppState::new();
+        let state = DaemonState::new();
         let mut config = Config::default();
         config.state.insert(
             "test_fail".to_string(),
@@ -293,7 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_evaluate_watch_tasks_cwd_not_exists() {
-        let state = AppState::new();
+        let state = DaemonState::new();
         let config = Config::default();
         let path = std::path::PathBuf::from("/this/path/does/not/exist/hopefully");
         evaluate_watch_tasks(&path, &state, &config, None).await;
@@ -301,7 +301,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_evaluate_watch_tasks_invalid_glob() {
-        let state = AppState::new();
+        let state = DaemonState::new();
         let mut config = Config::default();
         config.state.insert(
             "bad_glob".to_string(),
@@ -323,7 +323,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_evaluate_watch_tasks_failures() {
-        let state = AppState::new();
+        let state = DaemonState::new();
         let mut config = Config::default();
         config.state.insert(
             "fail_cmd".to_string(),

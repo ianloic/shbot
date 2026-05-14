@@ -17,7 +17,7 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::git::get_git_state;
 use crate::runner::evaluate_watch_tasks;
-use crate::state::AppState;
+use crate::state::DaemonState;
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, Watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -43,7 +43,7 @@ impl SyncWatcher {
 
     pub fn start(
         &self,
-        state: Arc<AppState>,
+        state: Arc<DaemonState>,
         config_rx: tokio::sync::watch::Receiver<Config>,
     ) -> Result<()> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
@@ -228,10 +228,10 @@ mod tests {
     #[tokio::test]
     async fn test_unwatch_never_watched() {
         use crate::config::Config;
-        use crate::state::AppState;
+        use crate::state::DaemonState;
 
         let watcher = SyncWatcher::new();
-        let state = AppState::new();
+        let state = DaemonState::new();
         let (_config_tx, config_rx) = tokio::sync::watch::channel(Config::default());
 
         watcher.start(state, config_rx).unwrap();
@@ -246,10 +246,10 @@ mod tests {
     #[tokio::test]
     async fn test_watcher_channel_disconnect() {
         use crate::config::Config;
-        use crate::state::AppState;
+        use crate::state::DaemonState;
 
         let watcher = SyncWatcher::new();
-        let state = AppState::new();
+        let state = DaemonState::new();
         let (_config_tx, config_rx) = tokio::sync::watch::channel(Config::default());
 
         watcher.start(state, config_rx).unwrap();

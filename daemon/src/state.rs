@@ -28,7 +28,7 @@ pub struct ClientInfo {
     pub last_state: HashMap<String, String>,
 }
 
-pub struct AppState {
+pub struct DaemonState {
     pub clients: RwLock<HashMap<Pid, ClientInfo>>,
     pub git_latencies: RwLock<HashMap<PathBuf, u64>>,
     pub last_trigger_refresh_micros: AtomicU64,
@@ -36,7 +36,7 @@ pub struct AppState {
     pub test_events_tx: tokio::sync::broadcast::Sender<()>,
 }
 
-impl AppState {
+impl DaemonState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             clients: RwLock::new(HashMap::new()),
@@ -204,6 +204,124 @@ impl AppState {
         #[cfg(test)]
         let _ = self.test_events_tx.send(());
     }
+
+    async fn check_and_unwatch(
+        &self,
+        target: &PathBuf,
+        watcher: &Arc<crate::watcher::SyncWatcher>,
+    ) {
+        let active_cwds = self.get_unique_cwds().await;
+        let mut keep = false;
+        for active in active_cwds {
+            let active_watch = if let Ok(Some((root, _))) = crate::git::get_git_state(&active) {
+                Some(root)
+            } else {
+                None
+            };
+            if active_watch.as_ref() == Some(target) {
+                keep = true;
+                break;
+            }
+        }
+        if !keep {
+            tracing::debug!("Unwatching target {:?} as no active cwds use it", target);
+            let watcher_clone = watcher.clone();
+            let unwatch_target = target.clone();
+            tokio::task::spawn_blocking(move || {
+                watcher_clone.unwatch(&unwatch_target);
+            });
+            self.git_latencies.write().await.remove(target);
+        } else {
+            tracing::debug!(
+                "Keeping watch on target {:?} as it is still used by another active cwd",
+                target
+            );
+        }
+    }
+
+    pub async fn handle_cd(
+        &self,
+        pid: Pid,
+        path: PathBuf,
+        watcher: Arc<crate::watcher::SyncWatcher>,
+        config: &crate::config::Config,
+    ) {
+        let old_cwd = self.get_cwd(pid).await;
+        self.update_cwd(pid, path.clone()).await;
+
+        let watch_target = if let Ok(Some((root, _))) = crate::git::get_git_state(&path) {
+            Some(root)
+        } else {
+            None
+        };
+        tracing::debug!(
+            "Handling cd to {:?}, evaluating watch target: {:?}",
+            path,
+            watch_target
+        );
+        if let Some(target) = &watch_target {
+            let watcher_clone = watcher.clone();
+            let watch_target_clone = target.clone();
+            tokio::task::spawn_blocking(move || {
+                watcher_clone.watch(&watch_target_clone);
+            });
+        }
+
+        if let Some(old) = old_cwd {
+            if old != path {
+                let old_watch_target = if let Ok(Some((root, _))) = crate::git::get_git_state(&old)
+                {
+                    Some(root)
+                } else {
+                    None
+                };
+
+                if let Some(old_target) = &old_watch_target {
+                    if old_watch_target != watch_target {
+                        self.check_and_unwatch(old_target, &watcher).await;
+                    }
+                }
+            }
+        }
+
+        let start_git = std::time::Instant::now();
+        if let Ok(Some((root, git_state))) = crate::git::get_git_state(&path) {
+            self.send_to(pid, "git", &git_state.to_payload()).await;
+            self.git_latencies
+                .write()
+                .await
+                .insert(root, start_git.elapsed().as_micros() as u64);
+        } else {
+            self.send_to(pid, "git", "").await;
+        }
+
+        let start_trigger = std::time::Instant::now();
+        crate::runner::evaluate_watch_tasks(&path, self, config, None).await;
+        self.last_trigger_refresh_micros.store(
+            start_trigger.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub async fn handle_client_disconnect(
+        &self,
+        pid: Pid,
+        watcher: Arc<crate::watcher::SyncWatcher>,
+    ) {
+        let old_cwd = self.get_cwd(pid).await;
+        self.remove_client(pid).await;
+        if let Some(old) = old_cwd {
+            let old_watch_target = if let Ok(Some((root, _))) = crate::git::get_git_state(&old) {
+                Some(root)
+            } else {
+                None
+            };
+
+            if let Some(old_target) = &old_watch_target {
+                self.check_and_unwatch(old_target, &watcher).await;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -214,7 +332,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cwd_tracking() {
-        let state = AppState::new();
+        let state = DaemonState::new();
         let (tx, _rx) = mpsc::channel(1);
 
         let path1 = PathBuf::from("/tmp/foo");
@@ -242,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_state_caching_and_invalidation() {
-        let state = AppState::new();
+        let state = DaemonState::new();
         let (tx, mut rx) = mpsc::channel(10);
         let path = PathBuf::from("/tmp/test");
 
@@ -289,7 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_broadcast_functions() {
-        let state = AppState::new();
+        let state = DaemonState::new();
         let (tx1, mut rx1) = mpsc::channel(10);
         let (tx2, mut rx2) = mpsc::channel(10);
 
@@ -331,7 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_status_dump_with_latencies() {
-        let state = AppState::new();
+        let state = DaemonState::new();
         state
             .git_latencies
             .write()
