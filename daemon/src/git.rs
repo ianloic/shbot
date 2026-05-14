@@ -120,10 +120,10 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
                 git2::DescribeOptions::new()
                     .describe_tags()
                     .max_candidates_tags(0),
-            )
-                && let Ok(format) = describe.format(None) {
-                    state.tag = format;
-                }
+            ) && let Ok(format) = describe.format(None)
+            {
+                state.tag = format;
+            }
 
             // Commit encoding & summary
             if let Ok(commit) = repo.find_commit(target) {
@@ -141,36 +141,38 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
         // Calculate ahead/behind if there is an upstream
         if let Some(name) = head.name()
             && let Ok(local) = repo.branch_upstream_name(name)
-                && let Some(local_str) = local.as_str() {
-                    if let Ok(upstream_obj) = repo.revparse_single(local_str)
-                        && let Ok(upstream_commit) = upstream_obj.peel_to_commit() {
-                            let local_oid = head.target().unwrap();
-                            let upstream_oid = upstream_commit.id();
-                            if let Ok((ahead, behind)) =
-                                repo.graph_ahead_behind(local_oid, upstream_oid)
-                            {
-                                state.commits_ahead = ahead;
-                                state.commits_behind = behind;
-                            }
-                        }
-
-                    if let Ok(buf) = repo.branch_upstream_remote(name)
-                        && let Some(remote_name) = buf.as_str() {
-                            state.remote_name = remote_name.to_string();
-
-                            if let Ok(remote) = repo.find_remote(remote_name)
-                                && let Some(url) = remote.url() {
-                                    state.remote_url = url.to_string();
-                                }
-
-                            let prefix = format!("refs/remotes/{}/", remote_name);
-                            if local_str.starts_with(&prefix) {
-                                state.remote_branch = local_str[prefix.len()..].to_string();
-                            } else {
-                                state.remote_branch = local_str.to_string();
-                            }
-                        }
+            && let Some(local_str) = local.as_str()
+        {
+            if let Ok(upstream_obj) = repo.revparse_single(local_str)
+                && let Ok(upstream_commit) = upstream_obj.peel_to_commit()
+            {
+                let local_oid = head.target().unwrap();
+                let upstream_oid = upstream_commit.id();
+                if let Ok((ahead, behind)) = repo.graph_ahead_behind(local_oid, upstream_oid) {
+                    state.commits_ahead = ahead;
+                    state.commits_behind = behind;
                 }
+            }
+
+            if let Ok(buf) = repo.branch_upstream_remote(name)
+                && let Some(remote_name) = buf.as_str()
+            {
+                state.remote_name = remote_name.to_string();
+
+                if let Ok(remote) = repo.find_remote(remote_name)
+                    && let Some(url) = remote.url()
+                {
+                    state.remote_url = url.to_string();
+                }
+
+                let prefix = format!("refs/remotes/{}/", remote_name);
+                if local_str.starts_with(&prefix) {
+                    state.remote_branch = local_str[prefix.len()..].to_string();
+                } else {
+                    state.remote_branch = local_str.to_string();
+                }
+            }
+        }
     } else {
         state.local_branch = "main".to_string(); // Initial repo, no commits
     }
@@ -256,42 +258,45 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
 
     // Push remote
     if let Ok(head) = repo.head()
-        && let Some(name) = head.name() {
-            let branch_name = name.trim_start_matches("refs/heads/");
-            let mut push_remote = None;
+        && let Some(name) = head.name()
+    {
+        let branch_name = name.trim_start_matches("refs/heads/");
+        let mut push_remote = None;
 
-            if let Ok(cfg) = repo.config() {
-                let push_remote_key = format!("branch.{}.pushRemote", branch_name);
-                if let Ok(pr) = cfg.get_string(&push_remote_key) {
-                    push_remote = Some(pr);
-                } else if let Ok(pr) = cfg.get_string("remote.pushDefault") {
-                    push_remote = Some(pr);
-                } else if let Ok(buf) = repo.branch_upstream_remote(name)
-                    && let Some(r) = buf.as_str() {
-                        push_remote = Some(r.to_string());
-                    }
-            }
-
-            if let Some(r) = push_remote {
-                state.push_remote_name = r.clone();
-                if let Ok(remote) = repo.find_remote(&r)
-                    && let Some(url) = remote.url() {
-                        state.push_remote_url = url.to_string();
-                    }
-
-                // push commits ahead/behind
-                let push_ref = format!("refs/remotes/{}/{}", r, branch_name);
-                if let Ok(upstream_obj) = repo.revparse_single(&push_ref)
-                    && let Ok(upstream_commit) = upstream_obj.peel_to_commit()
-                        && let Some(local_oid) = head.target()
-                            && let Ok((ahead, behind)) =
-                                repo.graph_ahead_behind(local_oid, upstream_commit.id())
-                            {
-                                state.push_commits_ahead = ahead;
-                                state.push_commits_behind = behind;
-                            }
+        if let Ok(cfg) = repo.config() {
+            let push_remote_key = format!("branch.{}.pushRemote", branch_name);
+            if let Ok(pr) = cfg.get_string(&push_remote_key) {
+                push_remote = Some(pr);
+            } else if let Ok(pr) = cfg.get_string("remote.pushDefault") {
+                push_remote = Some(pr);
+            } else if let Ok(buf) = repo.branch_upstream_remote(name)
+                && let Some(r) = buf.as_str()
+            {
+                push_remote = Some(r.to_string());
             }
         }
+
+        if let Some(r) = push_remote {
+            state.push_remote_name = r.clone();
+            if let Ok(remote) = repo.find_remote(&r)
+                && let Some(url) = remote.url()
+            {
+                state.push_remote_url = url.to_string();
+            }
+
+            // push commits ahead/behind
+            let push_ref = format!("refs/remotes/{}/{}", r, branch_name);
+            if let Ok(upstream_obj) = repo.revparse_single(&push_ref)
+                && let Ok(upstream_commit) = upstream_obj.peel_to_commit()
+                && let Some(local_oid) = head.target()
+                && let Ok((ahead, behind)) =
+                    repo.graph_ahead_behind(local_oid, upstream_commit.id())
+            {
+                state.push_commits_ahead = ahead;
+                state.push_commits_behind = behind;
+            }
+        }
+    }
 
     Ok(Some((root, state)))
 }

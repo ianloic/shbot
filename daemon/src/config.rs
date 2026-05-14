@@ -145,7 +145,10 @@ file = "/etc/os-release"
             assert_eq!(config.daemon.idle_timeout_sec, 600);
             assert_eq!(config.state.len(), 4);
 
-            let periodic = config.state.get("my_periodic").expect("Expected periodic state");
+            let periodic = config
+                .state
+                .get("my_periodic")
+                .expect("Expected periodic state");
             assert_eq!(periodic.invalidate.timeout, Some(10));
             if let StateSource::Command { command } = &periodic.source {
                 assert_eq!(command, "echo 'hello'");
@@ -153,7 +156,10 @@ file = "/etc/os-release"
                 panic!("Expected command source");
             }
 
-            let file_change = config.state.get("my_file").expect("Expected file-change state");
+            let file_change = config
+                .state
+                .get("my_file")
+                .expect("Expected file-change state");
             assert_eq!(file_change.invalidate.watch.as_deref(), Some("**/*.rs"));
             if let StateSource::Command { command } = &file_change.source {
                 assert_eq!(command, "cargo test");
@@ -161,14 +167,20 @@ file = "/etc/os-release"
                 panic!("Expected command source");
             }
 
-            let explicit = config.state.get("my_explicit").expect("Expected explicit state");
+            let explicit = config
+                .state
+                .get("my_explicit")
+                .expect("Expected explicit state");
             if let StateSource::Command { command } = &explicit.source {
                 assert_eq!(command, "git status");
             } else {
                 panic!("Expected command source");
             }
 
-            let file_source = config.state.get("my_file_source").expect("Expected file source state");
+            let file_source = config
+                .state
+                .get("my_file_source")
+                .expect("Expected file source state");
             if let StateSource::File { file } = &file_source.source {
                 assert_eq!(file, "/etc/os-release");
             } else {

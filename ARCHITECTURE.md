@@ -34,8 +34,8 @@ and broadcasting state updates back to specific shells.
   both Git and File Watch Task re-evaluations.
 - **`runner.rs`:** Handles user-defined `shbot.toml` configurations. Executes
   background tasks ranging from simple `timeout` recurring actions to targeted
-  `watch` state invalidations on specific paths. It securely pushes executed outputs
-  to matching clients over the socket via `broadcast_to_cwd`.
+  `watch` state invalidations on specific paths. It securely pushes executed
+  outputs to matching clients over the socket via `broadcast_to_cwd`.
 - **`git.rs`:** Inspects the current state of a Git repository quickly,
   determining dirty states or pending commits dynamically when a client
   navigates into an active tree or when the `watcher` detects modifications.
@@ -132,8 +132,8 @@ manual debugging.
 - `hello <pid>`: Sent by the shell upon startup to register its unique Process
   ID with the daemon.
 - `cd <path>`: Alerts the daemon that the user has changed directories. This
-  immediately triggers Git state evaluation and any matching watch
-  tasks for the new directory.
+  immediately triggers Git state evaluation and any matching watch tasks for the
+  new directory.
 - `status`: Sent by the `shbot status` CLI command to request a dump of the
   daemon's internal state. The daemon will respond and then immediately close
   the connection.

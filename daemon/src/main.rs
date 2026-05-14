@@ -162,10 +162,11 @@ fn handle_daemon() -> Result<()> {
         tokio::spawn(async move {
             use tokio::signal::unix::{SignalKind, signal};
             if let Ok(mut sig_term) = signal(SignalKind::terminate())
-                && let Some(_) = sig_term.recv().await {
-                    info!("Received SIGTERM, shutting down cleanly to flush coverage");
-                    std::process::exit(0);
-                }
+                && let Some(_) = sig_term.recv().await
+            {
+                info!("Received SIGTERM, shutting down cleanly to flush coverage");
+                std::process::exit(0);
+            }
         });
 
         runner::start_timeout_tasks(state.clone(), config_rx.clone());
@@ -291,7 +292,6 @@ pub fn get_socket_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_get_hostname_from_env() {

@@ -45,8 +45,8 @@ your shell.
 ### 3. Minimal Configuration (Optional)
 
 `shbot` natively comes with zero-configuration Git status reporting. If you want
-to configure background state updates or file-watchers, create the configuration file
-at `~/.config/shbot/shbot.toml`:
+to configure background state updates or file-watchers, create the configuration
+file at `~/.config/shbot/shbot.toml`:
 
 ```toml
 [daemon]
@@ -89,15 +89,15 @@ Types of state updates:
   - `invalidate.timeout`: Frequency in seconds.
 - **File Change**:
   - `source.command`: Shell command to execute on change.
-  - `invalidate.watch`: A glob pattern of the paths to monitor for changes (relative to the
-    shell's Current Working Directory), e.g., `"src/**/*.rs"`.
+  - `invalidate.watch`: A glob pattern of the paths to monitor for changes
+    (relative to the shell's Current Working Directory), e.g., `"src/**/*.rs"`.
 - **Explicit**:
   - `source.command`: Shell command to execute manually.
 
 > **Hot Reloading:** `shbot` dynamically hot-reloads its configuration when the
-> TOML file changes, instantly terminating or applying new timeouts
-> without needing to restart active shells. You can also manually trigger a
-> reload by running `shbot reload`.
+> TOML file changes, instantly terminating or applying new timeouts without
+> needing to restart active shells. You can also manually trigger a reload by
+> running `shbot reload`.
 
 ---
 
@@ -127,8 +127,8 @@ corresponds to a background task or native module, and triggers a prompt refresh
 
 ### Accessing Custom State
 
-If you defined `[state.my_background_task]` in your configuration whose
-command output was `"Success"`, you can access it in Zsh like so:
+If you defined `[state.my_background_task]` in your configuration whose command
+output was `"Success"`, you can access it in Zsh like so:
 
 ```zsh
 echo $SHBOT_STATE[my_background_task]

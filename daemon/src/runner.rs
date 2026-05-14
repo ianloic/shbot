@@ -157,10 +157,11 @@ pub async fn evaluate_watch_tasks(
 
                 for path in paths {
                     if let Ok(rel_path) = path.strip_prefix(cwd)
-                        && glob.is_match(rel_path) {
-                            matched = true;
-                            break;
-                        }
+                        && glob.is_match(rel_path)
+                    {
+                        matched = true;
+                        break;
+                    }
                 }
             } else {
                 // If affected_paths is None, force execution
@@ -168,9 +169,10 @@ pub async fn evaluate_watch_tasks(
             }
 
             if matched
-                && let Some(stdout) = evaluate_state_source(name, &state_config.source, cwd).await {
-                    state.broadcast_to_cwd(cwd, name, &stdout).await;
-                }
+                && let Some(stdout) = evaluate_state_source(name, &state_config.source, cwd).await
+            {
+                state.broadcast_to_cwd(cwd, name, &stdout).await;
+            }
         }
     }
 }
