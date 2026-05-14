@@ -13,10 +13,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use rexpect::session::{spawn, PtySession};
-use tempfile::TempDir;
-use std::process::{Child, Command};
+use rexpect::session::{PtySession, spawn};
 use std::path::PathBuf;
+use std::process::{Child, Command};
+use tempfile::TempDir;
 
 pub struct TestEnv {
     pub pty: PtySession,
@@ -32,7 +32,7 @@ impl TestEnv {
 
         let mut pty = spawn("env TERM=dumb PROMPT='> ' zsh -f -i", Some(30000))?;
         pty.exp_string("> ")?;
-        
+
         pty.send_line(&format!("export HOME={}", home_dir.path().display()))?;
         pty.exp_string("> ")?;
         pty.send_line(&format!("export HOST={}", host))?;
@@ -47,14 +47,17 @@ impl TestEnv {
     }
 
     pub fn get_shbot_bin_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let shbot_bin = std::env::var("SHBOT_BIN_PATH").map(PathBuf::from).unwrap_or_else(|_| {
-            let mut path = std::env::current_exe().expect("Failed to get current executable path");
-            path.pop();
-            path.pop();
-            path.push("shbot");
-            path
-        });
-        
+        let shbot_bin = std::env::var("SHBOT_BIN_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let mut path =
+                    std::env::current_exe().expect("Failed to get current executable path");
+                path.pop();
+                path.pop();
+                path.push("shbot");
+                path
+            });
+
         if !shbot_bin.exists() {
             Err(format!("shbot binary not found at {:?}", shbot_bin).into())
         } else {
@@ -65,7 +68,10 @@ impl TestEnv {
     pub fn start_daemon(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let shbot_bin = Self::get_shbot_bin_path()?;
 
-        let log_path = self.home_dir.path().join(format!(".local/state/shbot/{}.log", self.host));
+        let log_path = self
+            .home_dir
+            .path()
+            .join(format!(".local/state/shbot/{}.log", self.host));
         std::fs::create_dir_all(log_path.parent().unwrap())?;
         let log_file = std::fs::File::create(&log_path)?;
         let log_file_err = log_file.try_clone()?;
@@ -81,8 +87,13 @@ impl TestEnv {
 
         self.daemon_cmd = Some(daemon_cmd);
 
-        let socket_path = self.home_dir.path().join(format!(".local/state/shbot/{}.socket", self.host));
-        self.wait_for(60, || Ok::<bool, Box<dyn std::error::Error>>(socket_path.exists()))?;
+        let socket_path = self
+            .home_dir
+            .path()
+            .join(format!(".local/state/shbot/{}.socket", self.host));
+        self.wait_for(60, || {
+            Ok::<bool, Box<dyn std::error::Error>>(socket_path.exists())
+        })?;
         if !socket_path.exists() {
             self.kill_daemon();
             return Err(format!("Daemon socket was not created at {:?}", socket_path).into());
@@ -105,8 +116,13 @@ impl TestEnv {
             return Err("shbot connect failed".into());
         }
 
-        let socket_path = self.home_dir.path().join(format!(".local/state/shbot/{}.socket", self.host));
-        self.wait_for(60, || Ok::<bool, Box<dyn std::error::Error>>(socket_path.exists()))?;
+        let socket_path = self
+            .home_dir
+            .path()
+            .join(format!(".local/state/shbot/{}.socket", self.host));
+        self.wait_for(60, || {
+            Ok::<bool, Box<dyn std::error::Error>>(socket_path.exists())
+        })?;
         if !socket_path.exists() {
             return Err(format!("Daemon socket was not created at {:?}", socket_path).into());
         }
@@ -140,7 +156,7 @@ impl TestEnv {
         let pwd = std::env::current_dir()?;
         let plugin_path = pwd.parent().unwrap().join("zsh").join("shbot.plugin.zsh");
         self.send_line(&format!("source {}", plugin_path.display()))?;
-        
+
         // Trigger precmd to connect
         self.send_line("")?;
 

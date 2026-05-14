@@ -190,6 +190,7 @@ mod tests {
         config.state.insert(
             "test_1".to_string(),
             StateConfig {
+                scope: crate::scope::Scope::Global,
                 source: StateSource::Command {
                     command: "echo 'first'".to_string(),
                 },
@@ -213,6 +214,7 @@ mod tests {
         new_config.state.insert(
             "test_2".to_string(),
             StateConfig {
+                scope: crate::scope::Scope::Global,
                 source: StateSource::Command {
                     command: "echo 'second'".to_string(),
                 },
@@ -241,6 +243,7 @@ mod tests {
         config.state.insert(
             "rust_files".to_string(),
             StateConfig {
+                scope: crate::scope::Scope::Global,
                 source: StateSource::Command {
                     command: "echo 'rust'".to_string(),
                 },
@@ -272,6 +275,7 @@ mod tests {
         config.state.insert(
             "test_fail".to_string(),
             StateConfig {
+                scope: crate::scope::Scope::Global,
                 source: StateSource::Command {
                     command: "exit 1".to_string(),
                 },
@@ -306,6 +310,7 @@ mod tests {
         config.state.insert(
             "bad_glob".to_string(),
             StateConfig {
+                scope: crate::scope::Scope::Global,
                 source: StateSource::Command {
                     command: "echo 'hi'".to_string(),
                 },
@@ -328,6 +333,7 @@ mod tests {
         config.state.insert(
             "fail_cmd".to_string(),
             StateConfig {
+                scope: crate::scope::Scope::Global,
                 source: StateSource::Command {
                     command: "exit 1".to_string(),
                 },

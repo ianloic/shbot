@@ -50,6 +50,8 @@ fn default_idle_timeout() -> u64 {
 #[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 pub struct StateConfig {
+    #[serde(default)]
+    pub scope: crate::scope::Scope,
     #[serde(flatten)]
     pub source: StateSource,
     #[serde(flatten)]

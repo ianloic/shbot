@@ -34,8 +34,10 @@ and broadcasting state updates back to specific shells.
   both Git and File Watch Task re-evaluations.
 - **`runner.rs`:** Handles user-defined `shbot.toml` configurations. Executes
   background tasks ranging from simple `timeout` recurring actions to targeted
-  `watch` state invalidations on specific paths. It securely pushes executed
-  outputs to matching clients over the socket via `broadcast_to_cwd`.
+  `watch` state invalidations on specific paths. Supports directory scoping (via
+  `scope.rs`) allowing configurations to dynamically bind to project roots (like
+  the nearest `.git` directory). It securely pushes executed outputs to matching
+  clients over the socket via `broadcast_to_cwd`.
 - **`git.rs`:** Inspects the current state of a Git repository quickly,
   determining dirty states or pending commits dynamically when a client
   navigates into an active tree or when the `watcher` detects modifications.

@@ -19,6 +19,7 @@ mod error;
 mod git;
 mod protocol;
 mod runner;
+mod scope;
 mod server;
 mod state;
 mod watcher;

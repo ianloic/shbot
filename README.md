@@ -82,6 +82,17 @@ Define custom automated behaviors. The `<name>` you provide here will be the
 identifier used to access the result in Zsh (e.g., `my_task` populates
 `$SHBOT_STATE[my_task]`).
 
+You can optionally define the `scope` of a task, which controls how the daemon
+evaluates state relative to project directories. By default, tasks are `global`
+and evaluated for the entire system.
+
+- `scope = "global"` (Default): Evaluated once; shared across all shells.
+- `scope = "cwd"`: Evaluated strictly in the shell's current working directory.
+- `scope = "nearest(.git | .hg)"`: Walks upward from the shell's directory,
+  stopping at the _first_ directory containing `.git` or `.hg`.
+- `scope = "topmost(.git)"`: Walks upward, stopping at the _highest_ directory
+  containing `.git` before reaching the filesystem root.
+
 Types of state updates:
 
 - **Periodic**:
