@@ -106,9 +106,8 @@ impl SyncWatcher {
                         .iter()
                         .filter(|dirty_path| {
                             let match_cwd = dirty_path.starts_with(&cwd);
-                            let match_git = git_root
-                                .as_ref()
-                                .is_some_and(|r| dirty_path.starts_with(r));
+                            let match_git =
+                                git_root.as_ref().is_some_and(|r| dirty_path.starts_with(r));
                             if match_cwd || match_git {
                                 tracing::trace!(
                                     "Event path {:?} matched cwd or git root {:?}",
@@ -134,10 +133,11 @@ impl SyncWatcher {
                             state
                                 .broadcast_to_cwd(&cwd, "git", &git_state.to_payload())
                                 .await;
-                            state.git_latencies.write().await.insert(
-                                root,
-                                start_git.elapsed().as_micros() as u64,
-                            );
+                            state
+                                .git_latencies
+                                .write()
+                                .await
+                                .insert(root, start_git.elapsed().as_micros() as u64);
                         }
 
                         let start_trigger = std::time::Instant::now();
@@ -229,7 +229,6 @@ mod tests {
     async fn test_unwatch_never_watched() {
         use crate::config::Config;
         use crate::state::AppState;
-        
 
         let watcher = SyncWatcher::new();
         let state = AppState::new();
@@ -248,7 +247,6 @@ mod tests {
     async fn test_watcher_channel_disconnect() {
         use crate::config::Config;
         use crate::state::AppState;
-        
 
         let watcher = SyncWatcher::new();
         let state = AppState::new();

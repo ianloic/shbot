@@ -152,35 +152,42 @@ async fn handle_connection(
                     state.update_cwd(pid, path.clone()).await;
 
                     let watch_target = if let Ok(Some((root, _))) = get_git_state(&path) {
-                        root
+                        Some(root)
                     } else {
-                        path.clone()
+                        None
                     };
                     tracing::debug!(
                         "Handling cd to {:?}, evaluating watch target: {:?}",
                         path,
                         watch_target
                     );
-                    watcher.watch(&watch_target);
+                    if let Some(target) = &watch_target {
+                        let watcher_clone = watcher.clone();
+                        let watch_target_clone = target.clone();
+                        tokio::task::spawn_blocking(move || {
+                            watcher_clone.watch(&watch_target_clone);
+                        });
+                    }
 
                     if let Some(old) = old_cwd
-                        && old != path {
-                            let old_watch_target = if let Ok(Some((root, _))) = get_git_state(&old)
-                            {
-                                root
-                            } else {
-                                old.clone()
-                            };
+                        && old != path
+                    {
+                        let old_watch_target = if let Ok(Some((root, _))) = get_git_state(&old) {
+                            Some(root)
+                        } else {
+                            None
+                        };
 
-                            if old_watch_target != watch_target {
+                        if old_watch_target != watch_target {
+                            if let Some(old_target) = &old_watch_target {
                                 let active_cwds = state.get_unique_cwds().await;
                                 let mut keep = false;
                                 for active in active_cwds {
                                     let active_watch =
                                         if let Ok(Some((root, _))) = get_git_state(&active) {
-                                            root
+                                            Some(root)
                                         } else {
-                                            active.clone()
+                                            None
                                         };
                                     if active_watch == old_watch_target {
                                         keep = true;
@@ -190,18 +197,23 @@ async fn handle_connection(
                                 if !keep {
                                     tracing::debug!(
                                         "Unwatching target {:?} as no active cwds use it",
-                                        old_watch_target
+                                        old_target
                                     );
-                                    watcher.unwatch(&old_watch_target);
-                                    state.git_latencies.write().await.remove(&old_watch_target);
+                                    let watcher_clone = watcher.clone();
+                                    let unwatch_target = old_target.clone();
+                                    tokio::task::spawn_blocking(move || {
+                                        watcher_clone.unwatch(&unwatch_target);
+                                    });
+                                    state.git_latencies.write().await.remove(old_target);
                                 } else {
                                     tracing::debug!(
                                         "Keeping watch on target {:?} as it is still used by another active cwd",
-                                        old_watch_target
+                                        old_target
                                     );
                                 }
                             }
                         }
+                    }
 
                     let start_git = std::time::Instant::now();
                     if let Ok(Some((root, git_state))) = get_git_state(&path) {
@@ -302,38 +314,44 @@ async fn handle_connection(
         state.remove_client(pid).await;
         if let Some(old) = old_cwd {
             let old_watch_target = if let Ok(Some((root, _))) = get_git_state(&old) {
-                root
+                Some(root)
             } else {
-                old.clone()
+                None
             };
 
-            let active_cwds = state.get_unique_cwds().await;
-            let mut keep = false;
-            for active in active_cwds {
-                let active_watch = if let Ok(Some((root, _))) = get_git_state(&active) {
-                    root
-                } else {
-                    active.clone()
-                };
-                if active_watch == old_watch_target {
-                    keep = true;
-                    break;
+            if let Some(old_target) = &old_watch_target {
+                let active_cwds = state.get_unique_cwds().await;
+                let mut keep = false;
+                for active in active_cwds {
+                    let active_watch = if let Ok(Some((root, _))) = get_git_state(&active) {
+                        Some(root)
+                    } else {
+                        None
+                    };
+                    if active_watch == old_watch_target {
+                        keep = true;
+                        break;
+                    }
                 }
-            }
-            if !keep {
-                tracing::debug!(
-                    "Client {} disconnected, unwatching target {:?} as no other clients need it",
-                    pid,
-                    old_watch_target
-                );
-                watcher.unwatch(&old_watch_target);
-                state.git_latencies.write().await.remove(&old_watch_target);
-            } else {
-                tracing::debug!(
-                    "Client {} disconnected, keeping watch on target {:?} as it is still used by another active cwd",
-                    pid,
-                    old_watch_target
-                );
+                if !keep {
+                    tracing::debug!(
+                        "Client {} disconnected, unwatching target {:?} as no other clients need it",
+                        pid,
+                        old_target
+                    );
+                    let watcher_clone = watcher.clone();
+                    let unwatch_target = old_target.clone();
+                    tokio::task::spawn_blocking(move || {
+                        watcher_clone.unwatch(&unwatch_target);
+                    });
+                    state.git_latencies.write().await.remove(old_target);
+                } else {
+                    tracing::debug!(
+                        "Client {} disconnected, keeping watch on target {:?} as it is still used by another active cwd",
+                        pid,
+                        old_target
+                    );
+                }
             }
         }
     }
@@ -374,8 +392,6 @@ mod tests {
 
         (client, server_task, state, watcher)
     }
-
-
 
     #[tokio::test]
     async fn test_server_hello_cd() {
@@ -479,6 +495,11 @@ mod tests {
         let (mut client, server_task, state, watcher) = setup_server().await;
 
         let temp_dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(temp_dir.path())
+            .output()
+            .unwrap();
         let path_str = temp_dir.path().to_str().unwrap();
         let cd_cmd = format!("cd {}\n", path_str);
 
@@ -539,10 +560,20 @@ mod tests {
         };
 
         let temp_dir1 = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(temp_dir1.path())
+            .output()
+            .unwrap();
         let path_str1 = temp_dir1.path().to_str().unwrap();
         let cd_cmd1 = format!("cd {}\n", path_str1);
 
         let temp_dir2 = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(temp_dir2.path())
+            .output()
+            .unwrap();
         let path_str2 = temp_dir2.path().to_str().unwrap();
         let cd_cmd2 = format!("cd {}\n", path_str2);
 
