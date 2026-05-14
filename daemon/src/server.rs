@@ -237,6 +237,19 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
 
+    #[allow(unused_macros)]
+    macro_rules! wait_for_watch_count {
+        ($watcher:expr, $count:expr) => {
+            for _ in 0..50 {
+                if $watcher.get_watch_count() == $count {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+            assert_eq!($watcher.get_watch_count(), $count);
+        };
+    }
+
     async fn setup_server() -> (
         UnixStream,
         tokio::task::JoinHandle<()>,
@@ -382,7 +395,7 @@ mod tests {
         let _ = server_task.await;
 
         assert!(state.get_cwd(9999).await.is_none());
-        assert_eq!(watcher.get_watch_count(), 0);
+        wait_for_watch_count!(watcher, 0);
     }
 
     #[tokio::test]
@@ -418,6 +431,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_cd_shared_watch_target() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("debug")
+            .try_init();
         let (mut client1, _server_task1, state, watcher) = setup_server().await;
         let (mut client2, _server_task2) = {
             let (c, s) = UnixStream::pair().unwrap();
@@ -460,7 +476,7 @@ mod tests {
         client2.write_all(cd_cmd1.as_bytes()).await.unwrap();
         let _ = rx2.recv().await;
 
-        assert_eq!(watcher.get_watch_count(), 1);
+        wait_for_watch_count!(watcher, 1);
 
         // Disconnect client 1, client 2 still needs temp_dir1
         let mut rx = state.test_events_tx.subscribe();
@@ -468,7 +484,7 @@ mod tests {
         let _ = rx.recv().await;
 
         // Watcher count should still be 1 because client 2 is alive
-        assert_eq!(watcher.get_watch_count(), 1);
+        wait_for_watch_count!(watcher, 1);
 
         // cd client 2 away
         let mut rx = state.test_events_tx.subscribe();
@@ -476,7 +492,7 @@ mod tests {
         let _ = rx.recv().await;
 
         // now watcher should have 1 (for temp_dir2), and temp_dir1 should be unwatched
-        assert_eq!(watcher.get_watch_count(), 1);
+        wait_for_watch_count!(watcher, 1);
     }
 
     #[tokio::test]

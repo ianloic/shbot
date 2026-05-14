@@ -58,14 +58,20 @@ impl DaemonState {
             },
         );
         #[cfg(test)]
-        let _ = self.test_events_tx.send(());
+        {
+            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
+            let _ = self.test_events_tx.send(());
+        }
     }
 
     pub async fn remove_client(&self, pid: Pid) {
         let mut clients = self.clients.write().await;
         clients.remove(&pid);
         #[cfg(test)]
-        let _ = self.test_events_tx.send(());
+        {
+            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
+            let _ = self.test_events_tx.send(());
+        }
     }
 
     pub async fn update_cwd(&self, pid: Pid, cwd: PathBuf) {
@@ -74,7 +80,10 @@ impl DaemonState {
             client.cwd = cwd;
         }
         #[cfg(test)]
-        let _ = self.test_events_tx.send(());
+        {
+            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
+            let _ = self.test_events_tx.send(());
+        }
     }
 
     pub async fn get_cwd(&self, pid: Pid) -> Option<PathBuf> {
@@ -95,7 +104,10 @@ impl DaemonState {
             let _ = client.sender.try_send(msg.clone());
         }
         #[cfg(test)]
-        let _ = self.test_events_tx.send(());
+        {
+            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
+            let _ = self.test_events_tx.send(());
+        }
     }
 
     pub async fn broadcast_all(&self, state_id: &str, payload: &str) {
@@ -111,7 +123,10 @@ impl DaemonState {
             let _ = client.sender.try_send(msg.clone());
         }
         #[cfg(test)]
-        let _ = self.test_events_tx.send(());
+        {
+            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
+            let _ = self.test_events_tx.send(());
+        }
     }
     pub async fn send_to(&self, pid: Pid, state_id: &str, payload: &str) {
         let msg = format!("update {} {}\n", state_id, payload);
@@ -126,7 +141,10 @@ impl DaemonState {
             let _ = client.sender.try_send(msg);
         }
         #[cfg(test)]
-        let _ = self.test_events_tx.send(());
+        {
+            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
+            let _ = self.test_events_tx.send(());
+        }
     }
 
     pub async fn broadcast_to_cwd(&self, cwd: &Path, state_id: &str, payload: &str) {
@@ -144,7 +162,10 @@ impl DaemonState {
             }
         }
         #[cfg(test)]
-        let _ = self.test_events_tx.send(());
+        {
+            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
+            let _ = self.test_events_tx.send(());
+        }
     }
 
     pub async fn get_unique_cwds(&self) -> HashSet<PathBuf> {
@@ -202,7 +223,10 @@ impl DaemonState {
             }
         }
         #[cfg(test)]
-        let _ = self.test_events_tx.send(());
+        {
+            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
+            let _ = self.test_events_tx.send(());
+        }
     }
 
     async fn check_and_unwatch(
@@ -234,9 +258,10 @@ impl DaemonState {
             tracing::debug!("Unwatching target {:?} as no active cwds use it", target);
             let watcher_clone = watcher.clone();
             let unwatch_target = target.clone();
-            tokio::task::spawn_blocking(move || {
+            let _ = tokio::task::spawn_blocking(move || {
                 watcher_clone.unwatch(&unwatch_target);
-            });
+            })
+            .await;
             self.git_latencies.write().await.remove(target);
         } else {
             tracing::debug!(
@@ -270,9 +295,10 @@ impl DaemonState {
         for target in &watch_targets {
             let watcher_clone = watcher.clone();
             let watch_target_clone = target.clone();
-            tokio::task::spawn_blocking(move || {
+            let _ = tokio::task::spawn_blocking(move || {
                 watcher_clone.watch(&watch_target_clone);
-            });
+            })
+            .await;
         }
 
         if let Some(old) = old_cwd {

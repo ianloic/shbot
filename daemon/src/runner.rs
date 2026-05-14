@@ -68,7 +68,12 @@ pub async fn evaluate_state_source(
         StateSource::Native { native } => {
             if native == "git" {
                 let start_git = std::time::Instant::now();
-                if let Ok(Some((root, git_state))) = crate::git::get_git_state(cwd) {
+                let cwd_clone = cwd.to_path_buf();
+                let result =
+                    tokio::task::spawn_blocking(move || crate::git::get_git_state(&cwd_clone))
+                        .await;
+
+                if let Ok(Ok(Some((root, git_state)))) = result {
                     state
                         .git_latencies
                         .write()
