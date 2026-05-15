@@ -194,7 +194,7 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
     // Determine statuses
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
-        .recurse_untracked_dirs(true)
+        .recurse_untracked_dirs(false)
         .renames_head_to_index(true)
         .include_ignored(false)
         .update_index(false);

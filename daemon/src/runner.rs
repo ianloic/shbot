@@ -183,12 +183,30 @@ pub async fn evaluate_watch_tasks(
                     }
                 };
 
+                let mut ignores = None;
+                if let Some(ignore_patterns) = &state_config.invalidate.ignore {
+                    let mut builder = globset::GlobSetBuilder::new();
+                    for pattern in ignore_patterns {
+                        if let Ok(g) = globset::Glob::new(pattern) {
+                            builder.add(g);
+                        }
+                    }
+                    if let Ok(set) = builder.build() {
+                        ignores = Some(set);
+                    }
+                }
+
                 for path in paths {
-                    if let Ok(rel_path) = path.strip_prefix(&scope_root)
-                        && glob.is_match(rel_path)
-                    {
-                        matched = true;
-                        break;
+                    if let Ok(rel_path) = path.strip_prefix(&scope_root) {
+                        if let Some(ig) = &ignores {
+                            if ig.is_match(rel_path) {
+                                continue;
+                            }
+                        }
+                        if glob.is_match(rel_path) {
+                            matched = true;
+                            break;
+                        }
                     }
                 }
             } else {

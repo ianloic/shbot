@@ -72,6 +72,8 @@ pub struct StateInvalidate {
     #[serde(default)]
     pub watch: Option<String>,
     #[serde(default)]
+    pub ignore: Option<Vec<String>>,
+    #[serde(default)]
     pub timeout: Option<u64>,
     #[serde(default)]
     pub command: Option<String>,
@@ -108,6 +110,15 @@ impl Config {
                     },
                     invalidate: StateInvalidate {
                         watch: Some("**/*".to_string()),
+                        ignore: Some(vec![
+                            "**/.wine/**".to_string(),
+                            "**/.cache/**".to_string(),
+                            "**/.cargo/**".to_string(),
+                            "**/.rustup/**".to_string(),
+                            "**/.npm/**".to_string(),
+                            "**/.nvm/**".to_string(),
+                            "**/.git/objects/**".to_string(),
+                        ]),
                         pwd: Some(true),
                         ..Default::default()
                     },
