@@ -13,22 +13,25 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use crate::config::{Config, StateSource};
+use crate::config::{Config, StateId, StateSource};
+use crate::git::get_git_state;
 use crate::state::DaemonState;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::process::Command;
 use tokio::time::{Duration, sleep};
 use tracing::{error, info};
 
 pub async fn evaluate_state_source(
-    name: &str,
+    name: &StateId,
     source: &StateSource,
-    cwd: &std::path::Path,
+    cwd: &Path,
     state: &DaemonState,
 ) -> Option<String> {
     match source {
         StateSource::File { file } => {
-            let path = std::path::PathBuf::from(file);
+            let path = PathBuf::from(file);
             let path = if path.is_absolute() {
                 path
             } else {
@@ -67,11 +70,9 @@ pub async fn evaluate_state_source(
         }
         StateSource::Native { native } => {
             if native == "git" {
-                let start_git = std::time::Instant::now();
+                let start_git = Instant::now();
                 let cwd_clone = cwd.to_path_buf();
-                let result =
-                    tokio::task::spawn_blocking(move || crate::git::get_git_state(&cwd_clone))
-                        .await;
+                let result = tokio::task::spawn_blocking(move || get_git_state(&cwd_clone)).await;
 
                 if let Ok(Ok(Some((root, git_state)))) = result {
                     state
@@ -105,12 +106,14 @@ pub fn start_timeout_tasks(
 
             let config = config_rx.borrow().clone();
 
-            for (name, state_config) in config.state {
+            for (name, state_config) in &config.state {
                 if let Some(timeout_sec) = state_config.invalidate.timeout {
                     let name = name.clone();
                     let interval = Duration::from_secs(timeout_sec);
                     let state_clone = state.clone();
-                    let source = state_config.source.clone();
+                    let _source = state_config.source.clone();
+
+                    let config_clone = config.clone();
 
                     let handle = tokio::spawn(async move {
                         info!(
@@ -118,15 +121,22 @@ pub fn start_timeout_tasks(
                             name,
                             interval.as_secs()
                         );
-                        let default_cwd = std::env::current_dir()
-                            .unwrap_or_else(|_| std::path::PathBuf::from("/"));
                         loop {
                             sleep(interval).await;
-                            if let Some(stdout) =
-                                evaluate_state_source(&name, &source, &default_cwd, &state_clone)
-                                    .await
-                            {
-                                state_clone.broadcast_all(&name, &stdout).await;
+
+                            let scope_roots: Vec<_> = {
+                                let scoped_states = state_clone.scoped_states.read().await;
+                                scoped_states
+                                    .iter()
+                                    .filter_map(
+                                        |(k, _)| if k.0 == name { Some(k.1.clone()) } else { None },
+                                    )
+                                    .collect()
+                            };
+
+                            for root in scope_roots {
+                                evaluate_scoped_state(&name, &root, &state_clone, &config_clone)
+                                    .await;
                             }
                         }
                     });
@@ -143,83 +153,92 @@ pub fn start_timeout_tasks(
     });
 }
 
-pub async fn evaluate_watch_tasks(
-    cwd: &std::path::Path,
+pub async fn evaluate_scoped_state(
+    name: &StateId,
+    scope_root: &Path,
     state: &DaemonState,
     config: &Config,
-    affected_paths: Option<&[std::path::PathBuf]>,
 ) {
-    // Only run if the path exists
-    if !cwd.exists() {
-        return;
+    if let Some(state_config) = config.state.get(name) {
+        if let Some(stdout) =
+            evaluate_state_source(name, &state_config.source, scope_root, state).await
+        {
+            state.update_scoped_state(name, scope_root, &stdout).await;
+        }
     }
+}
 
-    for (name, state_config) in &config.state {
-        let watch_pattern = if let Some(w) = &state_config.invalidate.watch {
-            Some(w.as_str())
-        } else if let StateSource::File { file } = &state_config.source {
-            Some(file.as_str())
-        } else {
-            None
-        };
+pub async fn evaluate_watch_tasks(
+    state: &DaemonState,
+    config: &Config,
+    affected_paths: Option<&[PathBuf]>,
+) {
+    let active_scopes: Vec<_> = {
+        let scoped_states = state.scoped_states.read().await;
+        scoped_states.keys().cloned().collect()
+    };
 
-        if let Some(watch_pattern) = watch_pattern {
-            let mut matched = false;
-            let scope_root = state_config
-                .scope
-                .evaluate(cwd)
-                .unwrap_or_else(|| cwd.to_path_buf());
+    for (name, scope_root) in active_scopes {
+        if let Some(state_config) = config.state.get(&name) {
+            let watch_pattern = if let Some(w) = &state_config.invalidate.watch {
+                Some(w.as_str())
+            } else if let StateSource::File { file } = &state_config.source {
+                Some(file.as_str())
+            } else {
+                None
+            };
 
-            if let Some(paths) = affected_paths {
-                let builder = globset::GlobBuilder::new(watch_pattern);
-                let glob = match builder.build() {
-                    Ok(g) => g.compile_matcher(),
-                    Err(e) => {
-                        error!(
-                            "Invalid glob pattern '{}' for state '{}': {}",
-                            watch_pattern, name, e
-                        );
-                        continue;
-                    }
-                };
+            if let Some(watch_pattern) = watch_pattern {
+                let mut matched = false;
 
-                let mut ignores = None;
-                if let Some(ignore_patterns) = &state_config.invalidate.ignore {
-                    let mut builder = globset::GlobSetBuilder::new();
-                    for pattern in ignore_patterns {
-                        if let Ok(g) = globset::Glob::new(pattern) {
-                            builder.add(g);
+                if let Some(paths) = affected_paths {
+                    let builder = globset::GlobBuilder::new(watch_pattern);
+                    let glob = match builder.build() {
+                        Ok(g) => g.compile_matcher(),
+                        Err(e) => {
+                            error!(
+                                "Invalid glob pattern '{}' for state '{}': {}",
+                                watch_pattern, name, e
+                            );
+                            continue;
                         }
-                    }
-                    if let Ok(set) = builder.build() {
-                        ignores = Some(set);
-                    }
-                }
+                    };
 
-                for path in paths {
-                    if let Ok(rel_path) = path.strip_prefix(&scope_root) {
-                        if let Some(ig) = &ignores {
-                            if ig.is_match(rel_path) {
-                                continue;
+                    let mut ignores = None;
+                    if let Some(ignore_patterns) = &state_config.invalidate.ignore {
+                        let mut builder = globset::GlobSetBuilder::new();
+                        for pattern in ignore_patterns {
+                            if let Ok(g) = globset::Glob::new(pattern) {
+                                builder.add(g);
                             }
                         }
-                        if glob.is_match(rel_path) {
-                            tracing::info!("Noticed directory change: {:?}", path);
-                            matched = true;
-                            break;
+                        if let Ok(set) = builder.build() {
+                            ignores = Some(set);
                         }
                     }
-                }
-            } else {
-                // If affected_paths is None, force execution
-                matched = true;
-            }
 
-            if matched
-                && let Some(stdout) =
-                    evaluate_state_source(name, &state_config.source, cwd, state).await
-            {
-                state.broadcast_to_cwd(cwd, name, &stdout).await;
+                    for path in paths {
+                        if let Ok(rel_path) = path.strip_prefix(&scope_root) {
+                            if let Some(ig) = &ignores {
+                                if ig.is_match(rel_path) {
+                                    continue;
+                                }
+                            }
+                            if glob.is_match(rel_path) {
+                                tracing::info!("Noticed directory change: {:?}", path);
+                                matched = true;
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    // If affected_paths is None, force execution
+                    matched = true;
+                }
+
+                if matched {
+                    evaluate_scoped_state(&name, &scope_root, state, config).await;
+                }
             }
         }
     }
@@ -228,17 +247,22 @@ pub async fn evaluate_watch_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, StateConfig, StateInvalidate};
-    use tokio::sync::watch;
+    use crate::config::{Config, StateConfig, StateId, StateInvalidate};
+    use crate::scope::Scope;
+    use crate::state::{DaemonState, ScopedState};
+
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use tokio::sync::{RwLock, watch};
 
     #[tokio::test]
     async fn test_runner_reloads_on_config_change() {
         let state = DaemonState::new();
         let mut config = Config::default();
         config.state.insert(
-            "test_1".to_string(),
+            StateId::from("test_1"),
             StateConfig {
-                scope: crate::scope::Scope::Global,
+                scope: Scope::Global,
                 source: StateSource::Command {
                     command: "echo 'first'".to_string(),
                 },
@@ -247,6 +271,17 @@ mod tests {
                     ..Default::default()
                 },
             },
+        );
+
+        // Add a dummy ScopedState so the timeout task evaluates something
+        state.scoped_states.write().await.insert(
+            (StateId::from("test_1"), PathBuf::from("/")),
+            Arc::new(ScopedState {
+                name: StateId::from("test_1"),
+                scope_root: PathBuf::from("/"),
+                subscribers: RwLock::new(HashSet::new()),
+                last_value: RwLock::new(None),
+            }),
         );
 
         let (config_tx, config_rx) = watch::channel(config);
@@ -260,9 +295,9 @@ mod tests {
         // Update config to something else
         let mut new_config = Config::default();
         new_config.state.insert(
-            "test_2".to_string(),
+            StateId::from("test_2"),
             StateConfig {
-                scope: crate::scope::Scope::Global,
+                scope: Scope::Global,
                 source: StateSource::Command {
                     command: "echo 'second'".to_string(),
                 },
@@ -289,9 +324,9 @@ mod tests {
         let state = DaemonState::new();
         let mut config = Config::default();
         config.state.insert(
-            "rust_files".to_string(),
+            StateId::from("rust_files"),
             StateConfig {
-                scope: crate::scope::Scope::Global,
+                scope: Scope::Global,
                 source: StateSource::Command {
                     command: "echo 'rust'".to_string(),
                 },
@@ -305,15 +340,15 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
 
         // No paths means forced evaluation
-        evaluate_watch_tasks(cwd.path(), &state, &config, None).await;
+        evaluate_watch_tasks(&state, &config, None).await;
 
         // Let's test with matching path
         let affected_match = vec![cwd.path().join("src/main.rs")];
-        evaluate_watch_tasks(cwd.path(), &state, &config, Some(&affected_match)).await;
+        evaluate_watch_tasks(&state, &config, Some(&affected_match)).await;
 
         // Test with non-matching path
         let affected_nomatch = vec![cwd.path().join("src/main.js")];
-        evaluate_watch_tasks(cwd.path(), &state, &config, Some(&affected_nomatch)).await;
+        evaluate_watch_tasks(&state, &config, Some(&affected_nomatch)).await;
     }
 
     #[tokio::test]
@@ -321,9 +356,9 @@ mod tests {
         let state = DaemonState::new();
         let mut config = Config::default();
         config.state.insert(
-            "test_fail".to_string(),
+            StateId::from("test_fail"),
             StateConfig {
-                scope: crate::scope::Scope::Global,
+                scope: Scope::Global,
                 source: StateSource::Command {
                     command: "exit 1".to_string(),
                 },
@@ -332,6 +367,16 @@ mod tests {
                     ..Default::default()
                 },
             },
+        );
+
+        state.scoped_states.write().await.insert(
+            (StateId::from("test_fail"), PathBuf::from("/")),
+            Arc::new(ScopedState {
+                name: StateId::from("test_fail"),
+                scope_root: PathBuf::from("/"),
+                subscribers: RwLock::new(HashSet::new()),
+                last_value: RwLock::new(None),
+            }),
         );
 
         let (_config_tx, config_rx) = watch::channel(config);
@@ -345,10 +390,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_evaluate_watch_tasks_cwd_not_exists() {
+        // Obsolete test as cwd is no longer used, but let's keep a dummy
         let state = DaemonState::new();
         let config = Config::default();
-        let path = std::path::PathBuf::from("/this/path/does/not/exist/hopefully");
-        evaluate_watch_tasks(&path, &state, &config, None).await;
+        evaluate_watch_tasks(&state, &config, None).await;
     }
 
     #[tokio::test]
@@ -356,9 +401,9 @@ mod tests {
         let state = DaemonState::new();
         let mut config = Config::default();
         config.state.insert(
-            "bad_glob".to_string(),
+            StateId::from("bad_glob"),
             StateConfig {
-                scope: crate::scope::Scope::Global,
+                scope: Scope::Global,
                 source: StateSource::Command {
                     command: "echo 'hi'".to_string(),
                 },
@@ -371,7 +416,7 @@ mod tests {
 
         let cwd = tempfile::tempdir().unwrap();
         let affected = vec![cwd.path().join("test.txt")];
-        evaluate_watch_tasks(cwd.path(), &state, &config, Some(&affected)).await;
+        evaluate_watch_tasks(&state, &config, Some(&affected)).await;
     }
 
     #[tokio::test]
@@ -379,9 +424,9 @@ mod tests {
         let state = DaemonState::new();
         let mut config = Config::default();
         config.state.insert(
-            "fail_cmd".to_string(),
+            StateId::from("fail_cmd"),
             StateConfig {
-                scope: crate::scope::Scope::Global,
+                scope: Scope::Global,
                 source: StateSource::Command {
                     command: "exit 1".to_string(),
                 },
@@ -392,7 +437,7 @@ mod tests {
             },
         );
 
-        let cwd = tempfile::tempdir().unwrap();
-        evaluate_watch_tasks(cwd.path(), &state, &config, None).await;
+        let _cwd = tempfile::tempdir().unwrap();
+        evaluate_watch_tasks(&state, &config, None).await;
     }
 }

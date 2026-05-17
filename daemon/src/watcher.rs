@@ -91,49 +91,16 @@ impl SyncWatcher {
                     sample_paths
                 );
 
-                let unique_cwds = state.get_unique_cwds().await;
                 let config = config_rx.borrow().clone();
-                for cwd in unique_cwds {
-                    let mut scope_roots = Vec::new();
-                    for (_, state_config) in &config.state {
-                        if state_config.invalidate.watch.is_some()
-                            || state_config.invalidate.pwd.unwrap_or(false)
-                        {
-                            if let Some(root) = state_config.scope.evaluate(&cwd) {
-                                scope_roots.push(root);
-                            }
-                        }
-                    }
+                let affected_paths: Vec<PathBuf> = to_process.into_iter().collect();
 
-                    // Check if ANY dirty path is the cwd itself or a subdirectory of it,
-                    // or within any scope root.
-                    let affected_paths: Vec<PathBuf> = to_process
-                        .iter()
-                        .filter(|dirty_path| {
-                            let match_cwd = dirty_path.starts_with(&cwd);
-                            let match_scope = scope_roots.iter().any(|r| dirty_path.starts_with(r));
-                            if match_cwd || match_scope {
-                                tracing::trace!(
-                                    "Event path {:?} matched cwd or scope root {:?}",
-                                    dirty_path,
-                                    cwd
-                                );
-                                true
-                            } else {
-                                false
-                            }
-                        })
-                        .cloned()
-                        .collect();
-
-                    if !affected_paths.is_empty() {
-                        let start_trigger = std::time::Instant::now();
-                        evaluate_watch_tasks(&cwd, &state, &config, Some(&affected_paths)).await;
-                        state.last_trigger_refresh_micros.store(
-                            start_trigger.elapsed().as_micros() as u64,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                    }
+                if !affected_paths.is_empty() {
+                    let start_trigger = std::time::Instant::now();
+                    evaluate_watch_tasks(&state, &config, Some(&affected_paths)).await;
+                    state.last_trigger_refresh_micros.store(
+                        start_trigger.elapsed().as_micros() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                 }
             }
         });

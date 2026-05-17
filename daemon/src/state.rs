@@ -13,6 +13,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use crate::config::{Config, StateId};
+use crate::runner::evaluate_scoped_state;
+use crate::watcher::SyncWatcher;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,13 +28,22 @@ pub type Pid = u32;
 pub struct ClientInfo {
     pub cwd: PathBuf,
     pub sender: mpsc::Sender<String>,
-    pub last_state: HashMap<String, String>,
+    pub last_state: HashMap<StateId, String>,
+}
+
+#[derive(Debug)]
+pub struct ScopedState {
+    pub name: StateId,
+    pub scope_root: PathBuf,
+    pub subscribers: RwLock<HashSet<Pid>>,
+    pub last_value: RwLock<Option<String>>,
 }
 
 pub struct DaemonState {
     pub clients: RwLock<HashMap<Pid, ClientInfo>>,
     pub git_latencies: RwLock<HashMap<PathBuf, u64>>,
     pub last_trigger_refresh_micros: AtomicU64,
+    pub scoped_states: RwLock<HashMap<(StateId, PathBuf), Arc<ScopedState>>>,
     #[cfg(test)]
     pub test_events_tx: tokio::sync::broadcast::Sender<()>,
 }
@@ -42,6 +54,7 @@ impl DaemonState {
             clients: RwLock::new(HashMap::new()),
             git_latencies: RwLock::new(HashMap::new()),
             last_trigger_refresh_micros: AtomicU64::new(0),
+            scoped_states: RwLock::new(HashMap::new()),
             #[cfg(test)]
             test_events_tx: tokio::sync::broadcast::channel(100).0,
         })
@@ -90,93 +103,6 @@ impl DaemonState {
         self.clients.read().await.get(&pid).map(|c| c.cwd.clone())
     }
 
-    #[allow(dead_code)]
-    pub async fn broadcast(&self, state_id: &str, payload: &str) {
-        let msg = format!("update {} {}\n", state_id, payload);
-        let mut clients = self.clients.write().await;
-        for client in clients.values_mut() {
-            if client.last_state.get(state_id) == Some(&payload.to_string()) {
-                continue;
-            }
-            client
-                .last_state
-                .insert(state_id.to_string(), payload.to_string());
-            let _ = client.sender.try_send(msg.clone());
-        }
-        #[cfg(test)]
-        {
-            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
-            let _ = self.test_events_tx.send(());
-        }
-    }
-
-    pub async fn broadcast_all(&self, state_id: &str, payload: &str) {
-        let mut clients = self.clients.write().await;
-        let msg = format!("update {} {}\n", state_id, payload);
-        for client in clients.values_mut() {
-            if client.last_state.get(state_id) == Some(&payload.to_string()) {
-                continue;
-            }
-            client
-                .last_state
-                .insert(state_id.to_string(), payload.to_string());
-            let _ = client.sender.try_send(msg.clone());
-        }
-        #[cfg(test)]
-        {
-            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
-            let _ = self.test_events_tx.send(());
-        }
-    }
-    pub async fn send_to(&self, pid: Pid, state_id: &str, payload: &str) {
-        let msg = format!("update {} {}\n", state_id, payload);
-        let mut clients = self.clients.write().await;
-        if let Some(client) = clients.get_mut(&pid) {
-            if client.last_state.get(state_id) == Some(&payload.to_string()) {
-                return;
-            }
-            client
-                .last_state
-                .insert(state_id.to_string(), payload.to_string());
-            let _ = client.sender.try_send(msg);
-        }
-        #[cfg(test)]
-        {
-            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
-            let _ = self.test_events_tx.send(());
-        }
-    }
-
-    pub async fn broadcast_to_cwd(&self, cwd: &Path, state_id: &str, payload: &str) {
-        let msg = format!("update {} {}\n", state_id, payload);
-        let mut clients = self.clients.write().await;
-        for client in clients.values_mut() {
-            if client.cwd == cwd {
-                if client.last_state.get(state_id) == Some(&payload.to_string()) {
-                    continue;
-                }
-                client
-                    .last_state
-                    .insert(state_id.to_string(), payload.to_string());
-                let _ = client.sender.try_send(msg.clone());
-            }
-        }
-        #[cfg(test)]
-        {
-            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
-            let _ = self.test_events_tx.send(());
-        }
-    }
-
-    pub async fn get_unique_cwds(&self) -> HashSet<PathBuf> {
-        let clients = self.clients.read().await;
-        clients
-            .values()
-            .map(|c| c.cwd.clone())
-            .filter(|p| p.components().count() > 0)
-            .collect()
-    }
-
     pub async fn get_status_dump(&self, num_monitors: usize) -> String {
         let clients = self.clients.read().await;
         let mut dump = "shbot daemon status:\n".to_string();
@@ -216,60 +142,28 @@ impl DaemonState {
     }
 
     pub async fn invalidate(&self, query: &str) {
-        let mut clients = self.clients.write().await;
-        for client in clients.values_mut() {
-            if query == "*" || query == "all" {
-                client.last_state.clear();
-            } else {
-                client.last_state.remove(query);
+        {
+            let mut clients = self.clients.write().await;
+            for client in clients.values_mut() {
+                if query == "*" || query == "all" {
+                    client.last_state.clear();
+                } else {
+                    client.last_state.remove(query);
+                }
+            }
+        }
+        {
+            let scoped_states = self.scoped_states.read().await;
+            for (key, state) in scoped_states.iter() {
+                if query == "*" || query == "all" || key.0.0 == query {
+                    *state.last_value.write().await = None;
+                }
             }
         }
         #[cfg(test)]
         {
-            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
+            tracing::info!("TEST EVENT SENT from invalidate");
             let _ = self.test_events_tx.send(());
-        }
-    }
-
-    async fn check_and_unwatch(
-        &self,
-        target: &PathBuf,
-        watcher: &Arc<crate::watcher::SyncWatcher>,
-        config: &crate::config::Config,
-    ) {
-        let active_cwds = self.get_unique_cwds().await;
-        let mut keep = false;
-        for active in active_cwds {
-            for (_, state_config) in &config.state {
-                if state_config.invalidate.watch.is_some()
-                    || state_config.invalidate.pwd.unwrap_or(false)
-                {
-                    if let Some(scope_root) = state_config.scope.evaluate(&active) {
-                        if scope_root == *target {
-                            keep = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if keep {
-                break;
-            }
-        }
-        if !keep {
-            tracing::debug!("Unwatching target {:?} as no active cwds use it", target);
-            let watcher_clone = watcher.clone();
-            let unwatch_target = target.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                watcher_clone.unwatch(&unwatch_target);
-            })
-            .await;
-            self.git_latencies.write().await.remove(target);
-        } else {
-            tracing::debug!(
-                "Keeping watch on target {:?} as it is still used by another active cwd",
-                target
-            );
         }
     }
 
@@ -277,88 +171,232 @@ impl DaemonState {
         &self,
         pid: Pid,
         path: PathBuf,
-        watcher: Arc<crate::watcher::SyncWatcher>,
-        config: &crate::config::Config,
+        watcher: Arc<SyncWatcher>,
+        config: &Config,
     ) {
         let old_cwd = self.get_cwd(pid).await;
         self.update_cwd(pid, path.clone()).await;
 
-        let mut watch_targets = std::collections::HashMap::new();
+        let mut new_scopes = HashSet::new();
         for (name, state_config) in &config.state {
-            if state_config.invalidate.watch.is_some()
-                || state_config.invalidate.pwd.unwrap_or(false)
-            {
-                if let Some(root) = state_config.scope.evaluate(&path) {
-                    watch_targets
-                        .entry(root)
-                        .or_insert_with(Vec::new)
-                        .push(name.clone());
-                }
+            let root = state_config
+                .scope
+                .evaluate(&path)
+                .unwrap_or_else(|| path.clone());
+            new_scopes.insert((name.clone(), root));
+        }
+
+        let mut old_scopes = HashSet::new();
+        if let Some(old) = &old_cwd {
+            for (name, state_config) in &config.state {
+                let root = state_config
+                    .scope
+                    .evaluate(old)
+                    .unwrap_or_else(|| old.clone());
+                old_scopes.insert((name.clone(), root));
             }
         }
 
-        for (target, reasons) in &watch_targets {
-            let watcher_clone = watcher.clone();
-            let watch_target_clone = target.clone();
-            let reasons_clone = reasons.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                watcher_clone.watch(&watch_target_clone, &reasons_clone);
-            })
-            .await;
-        }
+        let to_add: Vec<_> = new_scopes.difference(&old_scopes).cloned().collect();
+        let to_remove: Vec<_> = old_scopes.difference(&new_scopes).cloned().collect();
 
-        if let Some(old) = old_cwd {
-            if old != path {
-                let mut old_watch_targets = HashSet::new();
-                for (_, state_config) in &config.state {
-                    if state_config.invalidate.watch.is_some()
-                        || state_config.invalidate.pwd.unwrap_or(false)
-                    {
-                        if let Some(root) = state_config.scope.evaluate(&old) {
-                            old_watch_targets.insert(root);
+        let mut newly_created_scopes = Vec::new();
+        let mut initial_payloads = Vec::new();
+
+        {
+            let mut scoped_states = self.scoped_states.write().await;
+            for key in to_add {
+                let state = scoped_states.entry(key.clone()).or_insert_with(|| {
+                    newly_created_scopes.push(key.clone());
+                    Arc::new(ScopedState {
+                        name: key.0.clone(),
+                        scope_root: key.1.clone(),
+                        subscribers: RwLock::new(HashSet::new()),
+                        last_value: RwLock::new(None),
+                    })
+                });
+                state.subscribers.write().await.insert(pid);
+
+                // If the state already has a value, send it to the client immediately
+                if let Some(val) = state.last_value.read().await.as_ref() {
+                    initial_payloads.push((key.0.clone(), val.clone()));
+                }
+            }
+
+            for key in to_remove {
+                let mut is_orphaned = false;
+                if let Some(state) = scoped_states.get(&key) {
+                    let mut subs = state.subscribers.write().await;
+                    subs.remove(&pid);
+                    if subs.is_empty() {
+                        is_orphaned = true;
+                    }
+                }
+                if is_orphaned {
+                    scoped_states.remove(&key);
+                    // Also unwatch
+                    if let Some(state_config) = config.state.get(&key.0) {
+                        if state_config.invalidate.watch.is_some()
+                            || state_config.invalidate.pwd.unwrap_or(false)
+                        {
+                            // Check if any OTHER active state is using this target before unwatching
+                            let target = &key.1;
+                            let mut keep = false;
+                            for (other_key, _) in scoped_states.iter() {
+                                if other_key.1 == *target {
+                                    if let Some(sc) = config.state.get(&other_key.0) {
+                                        if sc.invalidate.watch.is_some()
+                                            || sc.invalidate.pwd.unwrap_or(false)
+                                        {
+                                            keep = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if !keep {
+                                let watcher_clone = watcher.clone();
+                                let target_clone = key.1.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    watcher_clone.unwatch(&target_clone);
+                                })
+                                .await;
+                                self.git_latencies.write().await.remove(&key.1);
+                            }
                         }
                     }
                 }
+            }
+        }
 
-                for old_target in old_watch_targets {
-                    if !watch_targets.contains_key(&old_target) {
-                        self.check_and_unwatch(&old_target, &watcher, config).await;
-                    }
+        // Send any cached payloads
+        if !initial_payloads.is_empty() {
+            let mut clients = self.clients.write().await;
+            if let Some(client) = clients.get_mut(&pid) {
+                for (name, payload) in initial_payloads {
+                    let msg = format!("update {} {}\n", name, payload);
+                    client.last_state.insert(name, payload);
+                    let _ = client.sender.try_send(msg);
                 }
             }
         }
 
-        let start_trigger = std::time::Instant::now();
-        crate::runner::evaluate_watch_tasks(&path, self, config, None).await;
-        self.last_trigger_refresh_micros.store(
-            start_trigger.elapsed().as_micros() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        // For newly created scopes, we need to watch them and evaluate them immediately
+        for key in newly_created_scopes {
+            if let Some(state_config) = config.state.get(&key.0) {
+                if state_config.invalidate.watch.is_some()
+                    || state_config.invalidate.pwd.unwrap_or(false)
+                {
+                    let watcher_clone = watcher.clone();
+                    let target = key.1.clone();
+                    let reasons = vec![key.0.0.clone()];
+                    let _ = tokio::task::spawn_blocking(move || {
+                        watcher_clone.watch(&target, &reasons);
+                    })
+                    .await;
+                }
+
+                // Trigger initial evaluation
+                let start_trigger = std::time::Instant::now();
+                evaluate_scoped_state(&key.0, &key.1, self, config).await;
+                self.last_trigger_refresh_micros.store(
+                    start_trigger.elapsed().as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+        }
     }
 
     pub async fn handle_client_disconnect(
         &self,
         pid: Pid,
-        watcher: Arc<crate::watcher::SyncWatcher>,
-        config: &crate::config::Config,
+        watcher: Arc<SyncWatcher>,
+        config: &Config,
     ) {
         let old_cwd = self.get_cwd(pid).await;
         self.remove_client(pid).await;
         if let Some(old) = old_cwd {
-            let mut old_watch_targets = HashSet::new();
-            for (_, state_config) in &config.state {
-                if state_config.invalidate.watch.is_some()
-                    || state_config.invalidate.pwd.unwrap_or(false)
-                {
-                    if let Some(root) = state_config.scope.evaluate(&old) {
-                        old_watch_targets.insert(root);
+            let mut old_scopes = HashSet::new();
+            for (name, state_config) in &config.state {
+                let root = state_config
+                    .scope
+                    .evaluate(&old)
+                    .unwrap_or_else(|| old.clone());
+                old_scopes.insert((name.clone(), root));
+            }
+
+            let mut scoped_states = self.scoped_states.write().await;
+            for key in old_scopes {
+                let mut is_orphaned = false;
+                if let Some(state) = scoped_states.get(&key) {
+                    let mut subs = state.subscribers.write().await;
+                    subs.remove(&pid);
+                    if subs.is_empty() {
+                        is_orphaned = true;
+                    }
+                }
+                if is_orphaned {
+                    scoped_states.remove(&key);
+                    if let Some(state_config) = config.state.get(&key.0) {
+                        if state_config.invalidate.watch.is_some()
+                            || state_config.invalidate.pwd.unwrap_or(false)
+                        {
+                            let target = &key.1;
+                            let mut keep = false;
+                            for (other_key, _) in scoped_states.iter() {
+                                if other_key.1 == *target {
+                                    if let Some(sc) = config.state.get(&other_key.0) {
+                                        if sc.invalidate.watch.is_some()
+                                            || sc.invalidate.pwd.unwrap_or(false)
+                                        {
+                                            keep = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if !keep {
+                                let watcher_clone = watcher.clone();
+                                let target_clone = key.1.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    watcher_clone.unwatch(&target_clone);
+                                })
+                                .await;
+                                self.git_latencies.write().await.remove(&key.1);
+                            }
+                        }
                     }
                 }
             }
+        }
+    }
 
-            for old_target in old_watch_targets {
-                self.check_and_unwatch(&old_target, &watcher, config).await;
+    pub async fn update_scoped_state(&self, name: &StateId, scope_root: &Path, payload: &str) {
+        let clients_to_notify = {
+            let scoped_states = self.scoped_states.read().await;
+            if let Some(state) = scoped_states.get(&(name.clone(), scope_root.to_path_buf())) {
+                let mut last_val = state.last_value.write().await;
+                if last_val.as_deref() == Some(payload) {
+                    return;
+                }
+                *last_val = Some(payload.to_string());
+                state.subscribers.read().await.clone()
+            } else {
+                return;
             }
+        };
+
+        let msg = format!("update {} {}\n", name, payload);
+        let mut clients = self.clients.write().await;
+        for pid in clients_to_notify {
+            if let Some(client) = clients.get_mut(&pid) {
+                client.last_state.insert(name.clone(), payload.to_string());
+                let _ = client.sender.try_send(msg.clone());
+            }
+        }
+        #[cfg(test)]
+        {
+            let _ = self.test_events_tx.send(());
         }
     }
 }
@@ -405,26 +443,54 @@ mod tests {
 
         state.add_client(1, path.clone(), tx).await;
 
+        // manually set up a scoped state
+        state.scoped_states.write().await.insert(
+            (StateId::git(), path.clone()),
+            Arc::new(ScopedState {
+                name: StateId::git(),
+                scope_root: path.clone(),
+                subscribers: tokio::sync::RwLock::new([1].into()),
+                last_value: tokio::sync::RwLock::new(None),
+            }),
+        );
+        state.scoped_states.write().await.insert(
+            (StateId::from("other"), path.clone()),
+            Arc::new(ScopedState {
+                name: StateId::from("other"),
+                scope_root: path.clone(),
+                subscribers: tokio::sync::RwLock::new([1].into()),
+                last_value: tokio::sync::RwLock::new(None),
+            }),
+        );
+
         // 1. Initial send
-        state.send_to(1, "git", "initial payload").await;
+        state
+            .update_scoped_state(&StateId::git(), &path, "initial payload")
+            .await;
         let msg = rx.recv().await.unwrap();
         assert_eq!(msg, "update git initial payload\n");
 
         // 2. Duplicate send (should be cached, not sent)
-        state.send_to(1, "git", "initial payload").await;
+        state
+            .update_scoped_state(&StateId::git(), &path, "initial payload")
+            .await;
         assert!(
             rx.try_recv().is_err(),
             "Duplicate payload should not be sent"
         );
 
         // 3. Different payload (should be sent)
-        state.send_to(1, "git", "new payload").await;
+        state
+            .update_scoped_state(&StateId::git(), &path, "new payload")
+            .await;
         let msg = rx.recv().await.unwrap();
         assert_eq!(msg, "update git new payload\n");
 
         // 4. Invalidate specific query
         state.invalidate("git").await;
-        state.send_to(1, "git", "new payload").await;
+        state
+            .update_scoped_state(&StateId::git(), &path, "new payload")
+            .await;
         let msg = rx.recv().await.unwrap();
         assert_eq!(
             msg, "update git new payload\n",
@@ -432,58 +498,20 @@ mod tests {
         );
 
         // 5. Invalidate all
-        state.send_to(1, "other", "something").await;
+        state
+            .update_scoped_state(&StateId::from("other"), &path, "something")
+            .await;
         let _ = rx.recv().await.unwrap();
         state.invalidate("*").await;
 
-        state.send_to(1, "other", "something").await;
+        state
+            .update_scoped_state(&StateId::from("other"), &path, "something")
+            .await;
         let msg = rx.recv().await.unwrap();
         assert_eq!(
             msg, "update other something\n",
             "Payload should be sent again after wildcard invalidation"
         );
-    }
-
-    #[tokio::test]
-    async fn test_broadcast_functions() {
-        let state = DaemonState::new();
-        let (tx1, mut rx1) = mpsc::channel(10);
-        let (tx2, mut rx2) = mpsc::channel(10);
-
-        let path1 = PathBuf::from("/tmp/foo");
-        let path2 = PathBuf::from("/tmp/bar");
-
-        state.add_client(1, path1.clone(), tx1).await;
-        state.add_client(2, path2.clone(), tx2).await;
-
-        // test broadcast
-        state.broadcast("msg1", "data1").await;
-        assert_eq!(rx1.recv().await.unwrap(), "update msg1 data1\n");
-        assert_eq!(rx2.recv().await.unwrap(), "update msg1 data1\n");
-
-        // test broadcast cache hit
-        state.broadcast("msg1", "data1").await;
-        assert!(rx1.try_recv().is_err());
-        assert!(rx2.try_recv().is_err());
-
-        // test broadcast_all
-        state.broadcast_all("msg2", "data2").await;
-        assert_eq!(rx1.recv().await.unwrap(), "update msg2 data2\n");
-        assert_eq!(rx2.recv().await.unwrap(), "update msg2 data2\n");
-
-        // test broadcast_all cache hit
-        state.broadcast_all("msg2", "data2").await;
-        assert!(rx1.try_recv().is_err());
-        assert!(rx2.try_recv().is_err());
-
-        // test broadcast_to_cwd
-        state.broadcast_to_cwd(&path1, "msg3", "data3").await;
-        assert_eq!(rx1.recv().await.unwrap(), "update msg3 data3\n");
-        assert!(rx2.try_recv().is_err());
-
-        // test broadcast_to_cwd cache hit
-        state.broadcast_to_cwd(&path1, "msg3", "data3").await;
-        assert!(rx1.try_recv().is_err());
     }
 
     #[tokio::test]

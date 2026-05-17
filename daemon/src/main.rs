@@ -25,10 +25,18 @@ mod state;
 mod watcher;
 
 use crate::error::Result;
+use crate::server::LOG_RELOAD_HANDLE;
 use clap::Parser;
 use cli::{Cli, Commands};
+use std::env;
+use std::fs;
 use std::fs::File;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
+use std::process::{Command as StdCommand, Stdio, exit};
+use std::thread;
+use std::time::Duration;
 
 use tracing::{error, info};
 
@@ -68,16 +76,13 @@ fn main() -> Result<()> {
 }
 
 fn handle_status() -> Result<()> {
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
-
     let socket_path = get_socket_path()?;
     if !socket_path.exists() {
         println!("Daemon is not running (socket empty).");
         return Ok(());
     }
 
-    let mut stream = UnixStream::connect(&socket_path)?;
+    let mut stream = StdUnixStream::connect(&socket_path)?;
     stream.write_all(b"status\n")?;
 
     let mut response = String::new();
@@ -88,16 +93,13 @@ fn handle_status() -> Result<()> {
 }
 
 fn handle_reload() -> Result<()> {
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
-
     let socket_path = get_socket_path()?;
     if !socket_path.exists() {
         println!("Daemon is not running (socket empty).");
         return Ok(());
     }
 
-    let mut stream = UnixStream::connect(&socket_path)?;
+    let mut stream = StdUnixStream::connect(&socket_path)?;
     stream.write_all(b"reload\n")?;
 
     let mut response = String::new();
@@ -108,16 +110,13 @@ fn handle_reload() -> Result<()> {
 }
 
 fn handle_loglevel(level: &str) -> Result<()> {
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
-
     let socket_path = get_socket_path()?;
     if !socket_path.exists() {
         println!("Daemon is not running (socket empty).");
         return Ok(());
     }
 
-    let mut stream = UnixStream::connect(&socket_path)?;
+    let mut stream = StdUnixStream::connect(&socket_path)?;
     stream.write_all(format!("loglevel {}\n", level).as_bytes())?;
 
     let mut response = String::new();
@@ -168,7 +167,7 @@ fn handle_daemon() -> Result<()> {
                 && let Some(_) = sig_term.recv().await
             {
                 info!("Received SIGTERM, shutting down cleanly to flush coverage");
-                std::process::exit(0);
+                exit(0);
             }
         });
 
@@ -207,7 +206,7 @@ fn setup_logging(log_file: Option<&Path>) -> Result<()> {
     let format_layer = fmt::layer();
     if let Some(path) = log_file {
         if let Some(p) = path.parent() {
-            std::fs::create_dir_all(p)?;
+            fs::create_dir_all(p)?;
         }
         let file = File::create(path)?;
         tracing_subscriber::registry()
@@ -221,8 +220,7 @@ fn setup_logging(log_file: Option<&Path>) -> Result<()> {
             .init();
     }
 
-    // Store reload handle for dynamic updates
-    let _ = crate::server::LOG_RELOAD_HANDLE.set(reload_handle);
+    let _ = LOG_RELOAD_HANDLE.set(reload_handle);
 
     Ok(())
 }
@@ -231,27 +229,27 @@ fn handle_connect() -> Result<()> {
     let socket_path = get_socket_path()?;
 
     // Quick check if socket is already responsive
-    if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+    if socket_path.exists() && StdUnixStream::connect(&socket_path).is_ok() {
         return Ok(());
     }
 
     let state_dir = socket_path.parent().unwrap().to_path_buf();
-    std::fs::create_dir_all(&state_dir)?;
+    fs::create_dir_all(&state_dir)?;
 
     // Clean up stale socket before binding
     if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
+        fs::remove_file(&socket_path)?;
     }
 
     let hostname = get_hostname();
     let log_file = state_dir.join(format!("{}.log", hostname));
 
-    let stdout = std::fs::File::create(&log_file)?;
+    let stdout = fs::File::create(&log_file)?;
     let stderr = stdout.try_clone()?;
 
-    std::process::Command::new(std::env::current_exe()?)
+    StdCommand::new(env::current_exe()?)
         .arg("daemon")
-        .stdin(std::process::Stdio::null())
+        .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr)
         .current_dir(&state_dir)
@@ -259,20 +257,20 @@ fn handle_connect() -> Result<()> {
 
     // Wait briefly for the daemon to start and bind the socket
     for _ in 0..50 {
-        if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+        if socket_path.exists() && StdUnixStream::connect(&socket_path).is_ok() {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(10));
     }
 
     Ok(())
 }
 
 fn get_hostname() -> String {
-    std::env::var("HOST")
-        .or_else(|_| std::env::var("HOSTNAME"))
+    env::var("HOST")
+        .or_else(|_| env::var("HOSTNAME"))
         .unwrap_or_else(|_| {
-            std::fs::read_to_string("/proc/sys/kernel/hostname")
+            fs::read_to_string("/proc/sys/kernel/hostname")
                 .map(|s| s.trim().to_string())
                 .unwrap_or_else(|_| "localhost".to_string())
         })
@@ -280,7 +278,7 @@ fn get_hostname() -> String {
 
 // Socket path convention: ~/.local/state/shbot/socket/$HOST.socket
 pub fn get_socket_path() -> Result<PathBuf> {
-    let home = std::env::var("HOME").expect("HOME env var not set");
+    let home = env::var("HOME").expect("HOME env var not set");
     let host = get_hostname();
 
     let path = PathBuf::from(home)
@@ -295,6 +293,8 @@ pub fn get_socket_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener as StdUnixListener;
 
     #[test]
     fn test_get_hostname_from_env() {
@@ -331,7 +331,7 @@ mod tests {
             ],
             || {
                 let socket_path = get_socket_path().unwrap();
-                std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+                fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
 
                 // If daemon is not running (socket empty)
                 assert!(handle_status().is_ok());
@@ -339,11 +339,10 @@ mod tests {
                 assert!(handle_loglevel("debug").is_ok());
 
                 // Now mock the daemon
-                let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+                let listener = StdUnixListener::bind(&socket_path).unwrap();
 
-                std::thread::spawn(move || {
+                thread::spawn(move || {
                     for mut stream in listener.incoming().flatten() {
-                        use std::io::{Read, Write};
                         let mut buf = [0; 1024];
                         if let Ok(n) = stream.read(&mut buf) {
                             let req = String::from_utf8_lossy(&buf[..n]);

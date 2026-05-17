@@ -59,10 +59,11 @@ project's goals.
   uses `mise` to manage tool dependencies. To quickly format the entire
   repository simply run `mise run fmt` from the repository root. `mise` will
   automatically download the required pinned formatters (`shfmt` and `dprint`).
-- **Code Style**: When importing types or functions from within the crate,
-  always pull them into scope via `use` statements. Do not use inline `crate::`
-  paths (e.g., `crate::error::Result`) anywhere in the code except within `use`
-  declarations.
+- **Code Style**: When importing types or functions from within the crate or
+  standard library, always pull them into scope via `use` statements. Do not use
+  inline `crate::` paths (e.g., `crate::error::Result`) or `std::` paths (e.g.,
+  `std::path::PathBuf`) anywhere in the code except within `use` declarations.
+  The only exception is when there is a name conflict.
 
 ## 4. Licensing
 

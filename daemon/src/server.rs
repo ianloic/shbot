@@ -18,15 +18,16 @@ use crate::protocol::Command;
 use crate::state::{DaemonState, Pid};
 use crate::watcher::SyncWatcher;
 use listenfd::ListenFd;
+use std::fs;
+use std::os::unix::net::UnixListener as StdUnixListener;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, Registry, reload::Handle};
 
-pub static LOG_RELOAD_HANDLE: std::sync::OnceLock<Handle<EnvFilter, Registry>> =
-    std::sync::OnceLock::new();
+pub static LOG_RELOAD_HANDLE: OnceLock<Handle<EnvFilter, Registry>> = OnceLock::new();
 
 pub async fn run_server(
     state: Arc<DaemonState>,
@@ -34,7 +35,7 @@ pub async fn run_server(
     config_tx: tokio::sync::watch::Sender<Config>,
     watcher: Arc<SyncWatcher>,
     socket_path: PathBuf,
-    pre_bound_listener: Option<std::os::unix::net::UnixListener>,
+    pre_bound_listener: Option<StdUnixListener>,
 ) -> Result<()> {
     let mut listenfd = ListenFd::from_env();
 
@@ -48,9 +49,9 @@ pub async fn run_server(
     } else {
         // Unbind previous socket if it exists
         if socket_path.exists() {
-            std::fs::remove_file(&socket_path)?;
+            fs::remove_file(&socket_path)?;
         } else if let Some(p) = socket_path.parent() {
-            std::fs::create_dir_all(p)?;
+            fs::create_dir_all(p)?;
         }
 
         info!("Binding to socket: {:?}", socket_path);
@@ -230,9 +231,10 @@ async fn handle_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{Config, StateId};
     use crate::state::DaemonState;
     use crate::watcher::SyncWatcher;
+    use std::process::Command as StdCommand;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
@@ -301,8 +303,8 @@ mod tests {
 
         temp_env::async_with_vars([("HOME", Some(temp_home.path()))], async {
             let config_dir = temp_home.path().join(".config").join("shbot");
-            std::fs::create_dir_all(&config_dir).unwrap();
-            std::fs::write(config_dir.join("shbot.toml"), "invalid toml syntax = {").unwrap();
+            fs::create_dir_all(&config_dir).unwrap();
+            fs::write(config_dir.join("shbot.toml"), "invalid toml syntax = {").unwrap();
 
             client.write_all(b"reload\n").await.unwrap();
             client.write_all(b"status\n").await.unwrap(); // Close connection
@@ -332,7 +334,14 @@ mod tests {
         client.write_all(b"hello 12345\n").await.unwrap();
         let _ = rx.recv().await;
 
-        state.send_to(12345, "custom", "somedata").await;
+        state
+            .clients
+            .write()
+            .await
+            .get_mut(&12345)
+            .unwrap()
+            .last_state
+            .insert(StateId::from("custom"), "somedata".to_string());
         assert!(
             state
                 .clients
@@ -375,7 +384,7 @@ mod tests {
         let (mut client, server_task, state, watcher) = setup_server().await;
 
         let temp_dir = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
+        StdCommand::new("git")
             .arg("init")
             .current_dir(temp_dir.path())
             .output()
@@ -443,7 +452,7 @@ mod tests {
         };
 
         let temp_dir1 = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
+        StdCommand::new("git")
             .arg("init")
             .current_dir(temp_dir1.path())
             .output()
@@ -452,7 +461,7 @@ mod tests {
         let cd_cmd1 = format!("cd {}\n", path_str1);
 
         let temp_dir2 = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
+        StdCommand::new("git")
             .arg("init")
             .current_dir(temp_dir2.path())
             .output()

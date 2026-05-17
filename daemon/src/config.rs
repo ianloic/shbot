@@ -18,6 +18,46 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+#[serde(transparent)]
+pub struct StateId(pub String);
+
+impl StateId {
+    pub fn git() -> Self {
+        StateId("git".to_string())
+    }
+}
+
+impl std::fmt::Display for StateId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<&str> for StateId {
+    fn from(s: &str) -> Self {
+        StateId(s.to_string())
+    }
+}
+
+impl From<String> for StateId {
+    fn from(s: String) -> Self {
+        StateId(s)
+    }
+}
+
+impl std::borrow::Borrow<str> for StateId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for StateId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 pub struct Config {
@@ -25,7 +65,7 @@ pub struct Config {
     pub daemon: DaemonConfig,
 
     #[serde(default)]
-    pub state: HashMap<String, StateConfig>,
+    pub state: HashMap<StateId, StateConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -102,7 +142,7 @@ impl Config {
     pub fn inject_implicit_states(&mut self) {
         if !self.state.contains_key("git") {
             self.state.insert(
-                "git".to_string(),
+                StateId::git(),
                 StateConfig {
                     scope: crate::scope::Scope::Nearest(vec![".git".to_string()]),
                     source: StateSource::Native {
