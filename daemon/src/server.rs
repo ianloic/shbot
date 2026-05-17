@@ -203,7 +203,10 @@ async fn handle_connection(
             }
             Command::Status => {
                 // Send a status dump to this unique connection, then close
-                let dump = state.get_status_dump(watcher.get_watch_count()).await;
+                let config = config_rx.borrow().clone();
+                let dump = state
+                    .get_status_dump(watcher.get_watch_count(), &config)
+                    .await;
                 let _ = tx.try_send(dump);
 
                 // Yield to ensure the writer has a chance to write before we break and close the socket.

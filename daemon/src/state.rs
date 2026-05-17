@@ -103,7 +103,11 @@ impl DaemonState {
         self.clients.read().await.get(&pid).map(|c| c.cwd.clone())
     }
 
-    pub async fn get_status_dump(&self, num_monitors: usize) -> String {
+    pub async fn get_status_dump(
+        &self,
+        num_monitors: usize,
+        config: &crate::config::Config,
+    ) -> String {
         let clients = self.clients.read().await;
         let mut dump = "shbot daemon status:\n".to_string();
         let git_hash = option_env!("SHBOT_GIT_HASH").unwrap_or("unknown");
@@ -116,6 +120,39 @@ impl DaemonState {
             dump.push_str(&format!("      Cached States: {}\n", info.last_state.len()));
             for (state_id, _payload) in info.last_state.iter() {
                 dump.push_str(&format!("        - {}\n", state_id));
+            }
+        }
+
+        dump.push_str("Defined States:\n");
+        let scoped_states = self.scoped_states.read().await;
+        for (state_id, _) in &config.state {
+            dump.push_str(&format!("  - {}\n", state_id));
+
+            let mut active_scopes = Vec::new();
+            for ((key_id, scope_root), state) in scoped_states.iter() {
+                if key_id == state_id {
+                    active_scopes.push((scope_root, state));
+                }
+            }
+
+            if active_scopes.is_empty() {
+                dump.push_str("      (No active scopes)\n");
+            } else {
+                for (scope_root, state) in active_scopes {
+                    let subs = state.subscribers.read().await;
+                    dump.push_str(&format!("      Scope: {}\n", scope_root.display()));
+                    if subs.is_empty() {
+                        dump.push_str("        Subscribers: none\n");
+                    } else {
+                        let mut subs_list: Vec<_> =
+                            subs.iter().map(|pid| pid.to_string()).collect();
+                        subs_list.sort();
+                        dump.push_str(&format!(
+                            "        Subscribers: [{}]\n",
+                            subs_list.join(", ")
+                        ));
+                    }
+                }
             }
         }
 
@@ -179,21 +216,17 @@ impl DaemonState {
 
         let mut new_scopes = HashSet::new();
         for (name, state_config) in &config.state {
-            let root = state_config
-                .scope
-                .evaluate(&path)
-                .unwrap_or_else(|| path.clone());
-            new_scopes.insert((name.clone(), root));
+            if let Some(root) = state_config.scope.evaluate(&path) {
+                new_scopes.insert((name.clone(), root));
+            }
         }
 
         let mut old_scopes = HashSet::new();
         if let Some(old) = &old_cwd {
             for (name, state_config) in &config.state {
-                let root = state_config
-                    .scope
-                    .evaluate(old)
-                    .unwrap_or_else(|| old.clone());
-                old_scopes.insert((name.clone(), root));
+                if let Some(root) = state_config.scope.evaluate(old) {
+                    old_scopes.insert((name.clone(), root));
+                }
             }
         }
 
@@ -318,11 +351,9 @@ impl DaemonState {
         if let Some(old) = old_cwd {
             let mut old_scopes = HashSet::new();
             for (name, state_config) in &config.state {
-                let root = state_config
-                    .scope
-                    .evaluate(&old)
-                    .unwrap_or_else(|| old.clone());
-                old_scopes.insert((name.clone(), root));
+                if let Some(root) = state_config.scope.evaluate(&old) {
+                    old_scopes.insert((name.clone(), root));
+                }
             }
 
             let mut scoped_states = self.scoped_states.write().await;
@@ -523,7 +554,8 @@ mod tests {
             .await
             .insert(PathBuf::from("/tmp/myrepo"), 1500);
 
-        let dump = state.get_status_dump(2).await;
+        let config = crate::config::Config::default();
+        let dump = state.get_status_dump(2, &config).await;
         assert!(dump.contains("Git Monitor Latencies:"));
         assert!(dump.contains("/tmp/myrepo"));
         assert!(dump.contains("1.5 ms"));
