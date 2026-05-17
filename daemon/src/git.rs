@@ -199,6 +199,9 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
         .include_ignored(false)
         .update_index(false);
 
+    let workdir = repo.workdir().unwrap_or(repo.path());
+    tracing::info!("Starting libgit2 crawl for {:?}", workdir);
+
     if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
         for entry in statuses.iter() {
             let s = entry.status();
@@ -241,6 +244,8 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
             }
         }
     }
+
+    tracing::info!("Finished libgit2 crawl for {:?}", workdir);
 
     // Stashes
     let mut stashes = 0;

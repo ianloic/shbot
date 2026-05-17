@@ -204,6 +204,7 @@ pub async fn evaluate_watch_tasks(
                             }
                         }
                         if glob.is_match(rel_path) {
+                            tracing::info!("Noticed directory change: {:?}", path);
                             matched = true;
                             break;
                         }

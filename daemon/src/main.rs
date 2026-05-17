@@ -43,7 +43,8 @@ fn main() -> Result<()> {
             handle_connect()?;
         }
         Commands::Daemon => {
-            info!("Starting shbot daemon");
+            let git_hash = option_env!("SHBOT_GIT_HASH").unwrap_or("unknown");
+            info!("Starting shbot daemon (git hash: {})", git_hash);
             handle_daemon()?;
         }
         Commands::Status => {

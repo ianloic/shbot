@@ -180,6 +180,8 @@ impl DaemonState {
     pub async fn get_status_dump(&self, num_monitors: usize) -> String {
         let clients = self.clients.read().await;
         let mut dump = "shbot daemon status:\n".to_string();
+        let git_hash = option_env!("SHBOT_GIT_HASH").unwrap_or("unknown");
+        dump.push_str(&format!("  Version / Git Hash: {}\n", git_hash));
         dump.push_str(&format!("  Clients connected: {}\n", clients.len()));
 
         for (pid, info) in clients.iter() {

@@ -160,7 +160,7 @@ impl SyncWatcher {
                 warn!("Failed to watch {:?}: {}", path, e);
             } else {
                 paths.insert(path.to_path_buf());
-                info!("Watching path: {:?}", path);
+                info!("Started monitoring directory: {:?}", path);
             }
         }
     }
@@ -184,7 +184,7 @@ impl SyncWatcher {
                 }
             } else {
                 paths.remove(path);
-                info!("Unwatching path: {:?}", path);
+                info!("Stopped monitoring directory: {:?}", path);
             }
         }
     }
