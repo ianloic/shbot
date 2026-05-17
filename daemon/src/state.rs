@@ -283,22 +283,26 @@ impl DaemonState {
         let old_cwd = self.get_cwd(pid).await;
         self.update_cwd(pid, path.clone()).await;
 
-        let mut watch_targets = HashSet::new();
-        for (_, state_config) in &config.state {
+        let mut watch_targets = std::collections::HashMap::new();
+        for (name, state_config) in &config.state {
             if state_config.invalidate.watch.is_some()
                 || state_config.invalidate.pwd.unwrap_or(false)
             {
                 if let Some(root) = state_config.scope.evaluate(&path) {
-                    watch_targets.insert(root);
+                    watch_targets
+                        .entry(root)
+                        .or_insert_with(Vec::new)
+                        .push(name.clone());
                 }
             }
         }
 
-        for target in &watch_targets {
+        for (target, reasons) in &watch_targets {
             let watcher_clone = watcher.clone();
             let watch_target_clone = target.clone();
+            let reasons_clone = reasons.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                watcher_clone.watch(&watch_target_clone);
+                watcher_clone.watch(&watch_target_clone, &reasons_clone);
             })
             .await;
         }
@@ -317,7 +321,7 @@ impl DaemonState {
                 }
 
                 for old_target in old_watch_targets {
-                    if !watch_targets.contains(&old_target) {
+                    if !watch_targets.contains_key(&old_target) {
                         self.check_and_unwatch(&old_target, &watcher, config).await;
                     }
                 }

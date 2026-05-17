@@ -104,8 +104,7 @@ impl Scope {
                         break;
                     }
                 }
-                // Fallback to the requested start dir if not found, to scope it locally there
-                Some(start_dir.to_path_buf())
+                None
             }
             Scope::Topmost(markers) => {
                 let mut current = start_dir;
@@ -123,8 +122,7 @@ impl Scope {
                         break;
                     }
                 }
-                // Fallback to start_dir if no match
-                topmost_match.or_else(|| Some(start_dir.to_path_buf()))
+                topmost_match
             }
         }
     }
@@ -190,8 +188,8 @@ mod tests {
         // Start from sub, should find it in project
         assert_eq!(scope.evaluate(&sub), Some(project.clone()));
 
-        // Start from root, shouldn't find it, falls back to root
-        assert_eq!(scope.evaluate(root.path()), Some(root.path().to_path_buf()));
+        // Start from root, shouldn't find it, returns None
+        assert_eq!(scope.evaluate(root.path()), None);
 
         // Create another marker in deep
         fs::write(deep.join(".git"), "").unwrap();

@@ -145,7 +145,7 @@ impl SyncWatcher {
         self.watched_paths.lock().unwrap().len()
     }
 
-    pub fn watch(&self, path: &Path) {
+    pub fn watch(&self, path: &Path, reasons: &[String]) {
         if path.as_os_str().is_empty() {
             return;
         }
@@ -160,7 +160,10 @@ impl SyncWatcher {
                 warn!("Failed to watch {:?}: {}", path, e);
             } else {
                 paths.insert(path.to_path_buf());
-                info!("Started monitoring directory: {:?}", path);
+                info!(
+                    "Started monitoring directory: {:?} (Reasons: {:?})",
+                    path, reasons
+                );
             }
         }
     }
@@ -204,7 +207,7 @@ mod tests {
         let path = PathBuf::from("/tmp");
 
         // Before start() is called, the watcher is None. It should not panic.
-        watcher.watch(&path);
+        watcher.watch(&path, &[]);
         watcher.unwatch(&path);
 
         // We can't trivially call start() here without a full Tokio runtime
