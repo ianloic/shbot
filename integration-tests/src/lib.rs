@@ -18,6 +18,7 @@ pub mod test_env;
 #[cfg(test)]
 mod tests {
     use super::test_env::TestEnv;
+    use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
 
     // Quick test to ensure that the Zsh plugin sources correctly and spawns the shbot binary
@@ -93,6 +94,182 @@ mod tests {
         // Test if Zsh variable is set correctly
         let final_out = env.send_line("echo $SHBOT_STATE[generic]")?;
         assert!(final_out.contains("payloadinfo"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_protocol_newline_injection_is_escaped() -> Result<(), Box<dyn std::error::Error>> {
+        let mut env = TestEnv::new()?;
+
+        let dummy_sock = env.home_dir.path().join("dummy.sock");
+        let listener = UnixListener::bind(&dummy_sock)?;
+
+        env.send_line(&format!(
+            "export SHBOT_SOCKET={}",
+            dummy_sock.display()
+        ))?;
+        env.source_plugin()?;
+
+        listener.set_nonblocking(true)?;
+        let mut stream = None;
+        env.wait_for(5, || match listener.accept() {
+            Ok((s, _)) => {
+                stream = Some(s);
+                Ok::<bool, Box<dyn std::error::Error>>(true)
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                Ok::<bool, Box<dyn std::error::Error>>(false)
+            }
+            Err(e) => Err(e.into()),
+        })?;
+        let mut stream = stream.expect("plugin never connected");
+
+        // A payload containing an escaped newline that would, if naively
+        // relayed, be parsed by the shell as a forged second protocol line.
+        stream.write_all(b"update inj x%0Aupdate evil forged\n")?;
+
+        // The decoded payload must contain the newline literally. The retry
+        // loop also drains stale PTY output left by zle reset-prompt redraws.
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("print -r -- \"INJ=${SHBOT_STATE[inj]}\"")?;
+            Ok::<bool, Box<dyn std::error::Error>>(
+                out.contains("x\n") || out.contains("x\r\n"),
+            )
+        })?;
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("print -r -- \"INJ=${SHBOT_STATE[inj]}\"")?;
+            Ok::<bool, Box<dyn std::error::Error>>(out.contains("update evil forged"))
+        })?;
+
+        // ...but no forged state key may have been created.
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("print -r -- \"EV=${SHBOT_STATE[evil]-unset}\"")?;
+            Ok::<bool, Box<dyn std::error::Error>>(out.contains("EV=unset"))
+        })?;
+        let out = env.send_line("print -r -- \"EV=${SHBOT_STATE[evil]-unset}\"")?;
+        assert!(
+            out.contains("EV=unset"),
+            "forged state key must not be created, got: {}",
+            out
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_protocol_vcs_status_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let mut env = TestEnv::new()?;
+
+        let dummy_sock = env.home_dir.path().join("dummy.sock");
+        let listener = UnixListener::bind(&dummy_sock)?;
+
+        env.send_line("export SHBOT_SET_VCS_STATUS=1")?;
+        env.send_line(&format!(
+            "export SHBOT_SOCKET={}",
+            dummy_sock.display()
+        ))?;
+        env.source_plugin()?;
+
+        listener.set_nonblocking(true)?;
+        let mut stream = None;
+        env.wait_for(5, || match listener.accept() {
+            Ok((s, _)) => {
+                stream = Some(s);
+                Ok::<bool, Box<dyn std::error::Error>>(true)
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                Ok::<bool, Box<dyn std::error::Error>>(false)
+            }
+            Err(e) => Err(e.into()),
+        })?;
+        let mut stream = stream.expect("plugin never connected");
+
+        // 27 \x1f-separated gitstatus fields with escaped separators. Field 27
+        // carries an escaped newline to prove decoding happens before parsing.
+        let fields: Vec<&str> = vec![
+            "/tmp/repo", "abcdef123", "main", "", "", "", "", "0", "1", "0", "0", "0", "0", "0",
+            "0", "", "", "", "", "", "", "", "", "0", "0", "", "subject%0Abody",
+        ];
+        assert_eq!(fields.len(), 27);
+        let payload = fields.join("%1F");
+        stream.write_all(format!("update git {}\n", payload).as_bytes())?;
+
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("print -r -- \"BR=${VCS_STATUS_LOCAL_BRANCH}\"")?;
+            Ok::<bool, Box<dyn std::error::Error>>(out.contains("BR=main"))
+        })?;
+
+        // Field alignment must survive the many empty fields.
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("print -r -- \"NS=${VCS_STATUS_NUM_STAGED}\"")?;
+            Ok::<bool, Box<dyn std::error::Error>>(out.contains("NS=1"))
+        })?;
+
+        // The escaped newline in the last field decodes to a real newline.
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("print -r -- \"$VCS_STATUS_COMMIT_SUMMARY\"")?;
+            Ok::<bool, Box<dyn std::error::Error>>(out.contains("subject"))
+        })?;
+        let out = env.send_line("print -r -- \"$VCS_STATUS_COMMIT_SUMMARY\"")?;
+        assert!(out.contains("subject"), "got: {}", out);
+        assert!(out.contains("body"), "got: {}", out);
+        assert!(!out.contains("%0A"), "payload not decoded: {}", out);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_send_rejects_newline_injection() -> Result<(), Box<dyn std::error::Error>> {
+        let mut env = TestEnv::new()?;
+
+        let dummy_sock = env.home_dir.path().join("dummy.sock");
+        let listener = UnixListener::bind(&dummy_sock)?;
+
+        env.send_line(&format!(
+            "export SHBOT_SOCKET={}",
+            dummy_sock.display()
+        ))?;
+        env.source_plugin()?;
+
+        listener.set_nonblocking(true)?;
+        let mut stream = None;
+        env.wait_for(5, || match listener.accept() {
+            Ok((s, _)) => {
+                stream = Some(s);
+                Ok::<bool, Box<dyn std::error::Error>>(true)
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                Ok::<bool, Box<dyn std::error::Error>>(false)
+            }
+            Err(e) => Err(e.into()),
+        })?;
+        let mut stream = stream.expect("plugin never connected");
+        stream.set_nonblocking(true)?;
+
+        // Drain the initial hello/cd exchange.
+        env.wait_for(5, || {
+            let mut buf = [0; 256];
+            match stream.read(&mut buf) {
+                Ok(n) if n > 0 => Ok::<bool, Box<dyn std::error::Error>>(true),
+                Ok(_) => Ok(false),
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
+                Err(e) => Err(e.into()),
+            }
+        })?;
+
+        // A $PWD containing a newline must never reach the wire as two commands.
+        env.send_line("_shbot_send $'cd /evil\\nreload'")?;
+        let out = env.send_line("print -r -- RC=$?")?;
+        assert!(out.contains("RC=1"), "send must be refused, got: {}", out);
+
+        // Nothing extra may have been written to the socket.
+        let mut buf = [0; 256];
+        let n = stream.read(&mut buf).unwrap_or(0);
+        assert!(
+            n == 0,
+            "unexpected bytes written to socket after refused send"
+        );
 
         Ok(())
     }
@@ -291,11 +468,19 @@ mod tests {
             "Daemon should respond to status after crash recovery"
         );
 
-        // Final cleanup using pkill
-        let _ = std::process::Command::new("pkill")
-            .arg("-f")
-            .arg("shbot daemon")
-            .status();
+        // Final cleanup: kill exactly the daemon started by 'connect', scoped by
+        // the PID reported in the status dump (never a blanket pkill).
+        let status = String::from_utf8_lossy(&out.stdout);
+        if let Some(pid_line) = status.lines().find(|l| l.contains("Daemon PID:")) {
+            if let Some(pid_str) = pid_line.split(':').nth(1) {
+                if let Ok(daemon_pid) = pid_str.trim().parse::<u32>() {
+                    let _ = std::process::Command::new("kill")
+                        .arg("-TERM")
+                        .arg(daemon_pid.to_string())
+                        .status();
+                }
+            }
+        }
 
         Ok(())
     }
@@ -327,10 +512,10 @@ mod tests {
             .join(format!(".local/state/shbot/{}.socket", env.host));
 
         // Connect and disconnect rapidly to ensure FDs are released
-        for i in 0..1000 {
+        for _ in 0..1000 {
             let mut stream = std::os::unix::net::UnixStream::connect(&socket_path)?;
             use std::io::Write;
-            stream.write_all(format!("hello {}\n", i).as_bytes())?;
+            stream.write_all(format!("hello {}\n", std::process::id()).as_bytes())?;
             // Drop stream
         }
 
@@ -361,11 +546,11 @@ mod tests {
             .join(format!(".local/state/shbot/{}.socket", env.host));
         let shbot_bin = TestEnv::get_shbot_bin_path()?;
 
-        for i in 0..200 {
+        for _ in 0..200 {
             let temp_dir = tempfile::tempdir()?;
             let mut stream = std::os::unix::net::UnixStream::connect(&socket_path)?;
             use std::io::Write;
-            stream.write_all(format!("hello {}\n", i).as_bytes())?;
+            stream.write_all(format!("hello {}\n", std::process::id()).as_bytes())?;
             stream.write_all(format!("cd {}\n", temp_dir.path().display()).as_bytes())?;
             // Abruptly drop the client stream without unregistering via command
         }
@@ -423,7 +608,7 @@ watch = "**/*.txt"
         let temp_dir = tempfile::tempdir()?;
         let mut stream = std::os::unix::net::UnixStream::connect(&socket_path)?;
         use std::io::Write;
-        stream.write_all(b"hello 123\n")?;
+        stream.write_all(format!("hello {}\n", std::process::id()).as_bytes())?;
         stream.write_all(format!("cd {}\n", temp_dir.path().display()).as_bytes())?;
 
         // Create a file to trigger the watch
@@ -517,11 +702,11 @@ watch = "**/*.txt"
 
         let initial_fds = std::fs::read_dir(format!("/proc/{}/fd", pid))?.count();
         // Warm up phase to allow caches and allocator pools to expand
-        for i in 0..500 {
+        for _ in 0..500 {
             let temp_dir = tempfile::tempdir()?;
             let mut stream = std::os::unix::net::UnixStream::connect(&socket_path)?;
             use std::io::Write;
-            stream.write_all(format!("hello {}\n", i).as_bytes())?;
+            stream.write_all(format!("hello {}\n", std::process::id()).as_bytes())?;
             stream.write_all(format!("cd {}\n", temp_dir.path().display()).as_bytes())?;
         }
 
@@ -532,11 +717,11 @@ watch = "**/*.txt"
         let rss_after_warmup = get_rss()?;
 
         // Heavy load phase
-        for i in 500..1500 {
+        for _ in 500..1500 {
             let temp_dir = tempfile::tempdir()?;
             let mut stream = std::os::unix::net::UnixStream::connect(&socket_path)?;
             use std::io::Write;
-            stream.write_all(format!("hello {}\n", i).as_bytes())?;
+            stream.write_all(format!("hello {}\n", std::process::id()).as_bytes())?;
             stream.write_all(format!("cd {}\n", temp_dir.path().display()).as_bytes())?;
         }
 

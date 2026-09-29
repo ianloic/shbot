@@ -57,6 +57,22 @@ impl Command {
     }
 }
 
+pub fn encode_payload(payload: &str) -> String {
+    let mut out = String::with_capacity(payload.len());
+    for c in payload.chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            '\n' => out.push_str("%0A"),
+            '\r' => out.push_str("%0D"),
+            '\x1f' => out.push_str("%1F"),
+            '\x01' => out.push_str("%01"),
+            '\0' => out.push_str("%00"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +168,30 @@ mod tests {
             Command::parse("unknown_cmd arg"),
             Some(Command::Unknown("unknown_cmd".to_string()))
         );
+    }
+
+    #[test]
+    fn test_encode_payload_identity() {
+        assert_eq!(encode_payload("hello world"), "hello world");
+        assert_eq!(encode_payload(""), "");
+        assert_eq!(encode_payload("plain-123"), "plain-123");
+    }
+
+    #[test]
+    fn test_encode_payload_control_chars() {
+        assert_eq!(encode_payload("a\nb"), "a%0Ab");
+        assert_eq!(encode_payload("a\rb"), "a%0Db");
+        assert_eq!(encode_payload("a\x1fb"), "a%1Fb");
+        assert_eq!(encode_payload("a\x01b"), "a%01b");
+        assert_eq!(encode_payload("a\0b"), "a%00b");
+        assert_eq!(encode_payload("\n\r\x1f\x01\0"), "%0A%0D%1F%01%00");
+    }
+
+    #[test]
+    fn test_encode_payload_percent() {
+        assert_eq!(encode_payload("100%"), "100%25");
+        assert_eq!(encode_payload("%0A"), "%250A");
+        assert_eq!(encode_payload("a%25b"), "a%2525b");
+        assert_eq!(encode_payload("%\n"), "%25%0A");
     }
 }

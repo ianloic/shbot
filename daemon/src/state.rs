@@ -14,10 +14,12 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::config::{Config, StateId};
+use crate::protocol::encode_payload;
 use crate::runner::evaluate_scoped_state;
 use crate::watcher::SyncWatcher;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{RwLock, mpsc};
@@ -110,6 +112,7 @@ impl DaemonState {
         let mut dump = "shbot daemon status:\n".to_string();
         let git_hash = option_env!("SHBOT_GIT_HASH").unwrap_or("unknown");
         dump.push_str(&format!("  Version / Git Hash: {}\n", git_hash));
+        dump.push_str(&format!("  Daemon PID: {}\n", process::id()));
         dump.push_str(&format!("  Clients connected: {}\n", clients.len()));
 
         for (pid, info) in clients.iter() {
@@ -303,7 +306,7 @@ impl DaemonState {
             let mut clients = self.clients.write().await;
             if let Some(client) = clients.get_mut(&pid) {
                 for (name, payload) in initial_payloads {
-                    let msg = format!("update {} {}\n", name, payload);
+                    let msg = format!("update {} {}\n", name, encode_payload(&payload));
                     client.last_state.insert(name, payload);
                     let _ = client.sender.try_send(msg);
                 }
@@ -413,7 +416,7 @@ impl DaemonState {
             }
         };
 
-        let msg = format!("update {} {}\n", name, payload);
+        let msg = format!("update {} {}\n", name, encode_payload(payload));
         let mut clients = self.clients.write().await;
         for pid in clients_to_notify {
             if let Some(client) = clients.get_mut(&pid) {
@@ -535,6 +538,34 @@ mod tests {
             msg, "update other something\n",
             "Payload should be sent again after wildcard invalidation"
         );
+    }
+
+    #[tokio::test]
+    async fn test_update_scoped_state_escapes_newlines() {
+        let state = DaemonState::new();
+        let (tx, mut rx) = mpsc::channel(10);
+        let path = PathBuf::from("/tmp/injection");
+
+        state.add_client(1, path.clone(), tx).await;
+        state.scoped_states.write().await.insert(
+            (StateId::from("inj"), path.clone()),
+            Arc::new(ScopedState {
+                subscribers: RwLock::new([1].into()),
+                last_value: RwLock::new(None),
+            }),
+        );
+
+        state
+            .update_scoped_state(&StateId::from("inj"), &path, "x\nupdate evil forged")
+            .await;
+        let msg = rx.recv().await.unwrap();
+        assert_eq!(msg, "update inj x%0Aupdate evil forged\n");
+
+        state
+            .update_scoped_state(&StateId::from("inj"), &path, "a\x1fb%25c")
+            .await;
+        let msg = rx.recv().await.unwrap();
+        assert_eq!(msg, "update inj a%1Fb%2525c\n");
     }
 
     #[tokio::test]

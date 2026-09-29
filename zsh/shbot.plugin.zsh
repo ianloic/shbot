@@ -36,7 +36,15 @@ function _shbot_update_vcs_status() {
 
 	local sep=$'\x1f'
 	local -a resp
-	eval "resp=(\"\${(@s.$sep.)payload}\")"
+	local rest="$payload"
+	while true; do
+		resp+=("${rest%%$sep*}")
+		if [[ "$rest" == *$sep* ]]; then
+			rest="${rest#*$sep}"
+		else
+			break
+		fi
+	done
 
 	if [[ -z "${resp[1]}" ]]; then
 		unset VCS_STATUS_{WORKDIR,COMMIT,LOCAL_BRANCH,REMOTE_BRANCH,REMOTE_NAME,REMOTE_URL,ACTION,INDEX_SIZE,NUM_STAGED,NUM_UNSTAGED,NUM_CONFLICTED,NUM_UNTRACKED,HAS_STAGED,HAS_UNSTAGED,HAS_CONFLICTED,HAS_UNTRACKED,COMMITS_AHEAD,COMMITS_BEHIND,STASHES,TAG,NUM_UNSTAGED_DELETED,NUM_STAGED_NEW,NUM_STAGED_DELETED,PUSH_REMOTE_NAME,PUSH_REMOTE_URL,PUSH_COMMITS_AHEAD,PUSH_COMMITS_BEHIND,NUM_SKIP_WORKTREE,NUM_ASSUME_UNCHANGED,COMMIT_ENCODING,COMMIT_SUMMARY}
@@ -87,6 +95,10 @@ function _shbot_update_vcs_status() {
 function _shbot_send() {
 	if [[ $SHBOT_FD -eq 0 ]]; then
 		_shbot_debug "Cannot send '$1': no active connection"
+		return 1
+	fi
+	if [[ "$1" == *$'\n'* || "$1" == *$'\r'* ]]; then
+		_shbot_debug "Refusing to send command containing a newline"
 		return 1
 	fi
 	_shbot_debug "Sending command: $1"
@@ -148,6 +160,14 @@ function _shbot_read_handler() {
 	if [[ "$msg_type" == "update" ]]; then
 		local state_id="${rest%% *}"
 		local payload="${rest#* }"
+		local marker=$'\x01' nl=$'\n' cr=$'\r' us=$'\x1f'
+		payload="${payload//'%25'/$marker}"
+		payload="${payload//'%0A'/$nl}"
+		payload="${payload//'%0D'/$cr}"
+		payload="${payload//'%1F'/$us}"
+		payload="${payload//'%00'/}"
+		payload="${payload//"$marker"/%}"
+		payload="${payload//'%01'/$marker}"
 		SHBOT_STATE[$state_id]="$payload"
 		_shbot_debug "Updated state: $state_id = $payload"
 
