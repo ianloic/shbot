@@ -16,28 +16,45 @@ and broadcasting state updates back to specific shells.
 ### Key Components:
 
 - **`main.rs` & `cli.rs`:** Handles argument parsing using `clap`. Supports
-  commands like `daemon` (to start the background process using double-fork
-  isolation via `daemonize` if not socket-activated), `connect` (for shells to
+  commands like `daemon` (to start the background process via a self-`spawn()`
+  of the current executable if not socket-activated), `connect` (for shells to
   initially bootstrap), `status` (for troubleshooting), `reload` (for dynamic
   config reload) and `loglevel` (for dynamic log filtering).
 - **`server.rs`:** Manages the UNIX socket listener
-  (`~/.local/state/shbot/<HOST>.socket`). It accepts incoming shell connections,
-  registers them, and handles incoming commands (like `cd`) to update the
-  daemon's awareness of where the shell is currently operating.
-- **`state.rs` (`AppState`):** A thread-safe, central registry of all connected
-  `ClientInfo`s (using `tokio::sync::RwLock` around a `HashMap`). It maps PID to
-  Working Directory (CWD) and holds a messaging channel (`mpsc::Sender<String>`)
-  bridging the async environment to the socket writer.
+  (`~/.local/state/shbot/<HOST>.socket`). Every accepted connection is
+  authenticated with kernel peer credentials (`SO_PEERCRED`): connections from a
+  different uid are rejected, and a client's `hello <pid>` registration is only
+  accepted when it matches the kernel-provided pid, preventing PID-spoofing and
+  client hijacking. The socket file is created with mode `0600` and the state
+  directory with `0700`, independent of the process umask. The server enforces
+  hard resource limits: a 64 KiB cap per protocol line, at most 128 concurrent
+  connections, and an idle timeout (`daemon.idle_timeout_sec`) that disconnects
+  connections with no client commands or server pushes within the configured
+  window. A second daemon instance refuses to bind over a live socket instead of
+  unlinking it.
+- **`state.rs` (`DaemonState`):** A thread-safe, central registry of all
+  connected `ClientInfo`s (using `tokio::sync::RwLock` around a `HashMap`). It
+  maps PID to Working Directory (CWD) and holds a messaging channel
+  (`mpsc::Sender<String>`) bridging the async environment to the socket writer.
+  An in-flight set deduplicates concurrent evaluations of the same scope so that
+  slow or hanging tasks are not re-spawned on every trigger.
 - **`watcher.rs` (`SyncWatcher`):** Leverages the `notify` crate to hook into
   OS-level filesystem events securely. When a directory tree changes, it
   immediately identifies intersecting CWDs of connected clients and triggers
-  both Git and File Watch Task re-evaluations.
+  both Git and File Watch Task re-evaluations. Event bursts flow through a
+  bounded channel (excess events are dropped and re-detected on the next change)
+  and recursive watches are capped at 256 paths; the daemon refuses to
+  recursively watch `/`, `/proc`, `/sys`, `/dev`, and `/run`.
 - **`runner.rs`:** Handles user-defined `shbot.toml` configurations. Executes
   background tasks ranging from simple `timeout` recurring actions to targeted
   `watch` state invalidations on specific paths. Supports directory scoping (via
   `scope.rs`) allowing configurations to dynamically bind to project roots (like
-  the nearest `.git` directory). It securely pushes executed outputs to matching
-  clients over the socket via `broadcast_to_cwd`.
+  the nearest `.git` directory). Commands are executed with `sh -c` under strict
+  resource controls: stdin is attached to `/dev/null`, the child is killed when
+  the future is dropped (`kill_on_drop`), execution is bounded by
+  `daemon.command_timeout_sec`, and captured output is capped at 64 KiB. It
+  securely pushes executed outputs to matching clients over the socket via
+  `broadcast_to_cwd`.
 - **`git.rs`:** Inspects the current state of a Git repository quickly,
   determining dirty states or pending commits dynamically when a client
   navigates into an active tree or when the `watcher` detects modifications.
@@ -46,28 +63,29 @@ and broadcasting state updates back to specific shells.
 
 The integration heavily relies on instantaneous connection bootstrapping without
 requiring polling loops or external supervisors. The start-up sequence operates
-using `systemd` socket activation or a built-in `fork()` fallback mechanism:
+using `systemd` socket activation or a built-in self-spawn fallback mechanism:
 
 1. **Systemd Socket Activation:** By default, the `install.sh` configures
    systemd user services (`shbot.socket` and `shbot.service`). When `shbot` (or
    Zsh) tries to communicate with the socket, systemd automatically spawns the
-   daemon and passes the active `UnixListener` via the `ListenFd` crate.
+   daemon and passes the active `UnixListener` via the `ListenFd` crate. systemd
+   pre-creates the socket with `SocketMode=0600`.
 2. **Shell Check:** When the Zsh plugin starts, it uses the native `zsocket`
    command to immediately test the socket file
    (`~/.local/state/shbot/<HOST>.socket`). If the socket responds, connection
    completes instantly.
 3. **Foreground Launcher (`shbot connect`):** If no daemon is listening (and
    systemd is unavailable), the shell synchronously runs `shbot connect`.
-4. **Early Bind and Validation:** The `connect` launcher instantly drops any
-   stale socket left over from a previous crash and securely binds to the new
-   `UnixListener` _in the foreground process_.
-5. **Daemonize Double-Fork:** The launcher then uses the `daemonize` crate to
-   safely double-fork into the background and isolate the process. Because this
-   is purely an OS-level `fork()` (without `exec()`), the background process
-   perfectly inherits the active file descriptor of the bound `UnixListener`.
-6. **Instant Guarantee:** The parent launcher safely terminates knowing the
-   socket is completely operational. When control is returned to Zsh, the shell
-   plugin verifies the new socket instantly with a zero-delay `zsocket` success.
+4. **Stale Socket Cleanup:** The launcher probes the existing socket file; a
+   stale leftover from a crashed daemon is unlinked, while a live socket ends
+   the bootstrap immediately. The daemon itself repeats this liveness check and
+   refuses to bind over a socket owned by another live daemon.
+5. **Self-Spawn:** The launcher spawns `<current_exe> daemon` (fork + exec) with
+   stdio redirected to the per-host log file. The daemon process creates the
+   state directory (`0700`) and binds the socket (`0600`) itself.
+6. **Startup Verification:** The launcher polls briefly (bounded to ~500 ms)
+   until the socket responds, then returns control to Zsh, which completes the
+   `zsocket` connection with zero additional delay.
 
 ## 3. Zsh Integration (`zsh/`)
 
@@ -132,13 +150,16 @@ manual debugging.
 ### Client to Daemon Commands:
 
 - `hello <pid>`: Sent by the shell upon startup to register its unique Process
-  ID with the daemon.
+  ID with the daemon. The daemon validates the claimed pid against the
+  connection's kernel peer credentials (`SO_PEERCRED`); a mismatching pid is
+  rejected with an `error:` reply and the connection is closed.
 - `cd <path>`: Alerts the daemon that the user has changed directories. This
   immediately triggers Git state evaluation and any matching watch tasks for the
   new directory.
 - `status`: Sent by the `shbot status` CLI command to request a dump of the
-  daemon's internal state. The daemon will respond and then immediately close
-  the connection.
+  daemon's internal state (including the daemon PID, every client's PID and CWD,
+  and state metrics). The daemon will respond and then immediately close the
+  connection.
 - `reload`: Sent by the `shbot reload` CLI command. Forces the daemon to reload
   its configuration from disk and apply it immediately.
 - `loglevel <level>`: Sent by `shbot loglevel <level>`. Modifies the daemon's
@@ -152,5 +173,10 @@ manual debugging.
   the client whenever background tasks complete or file system changes are
   detected. Modifies the shell's prompt securely without blocking input.
   Examples: `update git dirty`, `update periodic true`.
+- The payload is percent-encoded on the wire (`\n` as `%0A`, `\r` as `%0D`, the
+  unit separator as `%1F`, `%` as `%25`) so that arbitrary task output, file
+  contents, or git data (remote URLs, commit summaries) can never inject forged
+  protocol lines into the shell. The Zsh plugin decodes the escapes before
+  storing the value in `$SHBOT_STATE`, so users always observe the raw payload.
 - `shbot daemon status:\n...`: A multi-line response provided to the
   `shbot status` CLI command containing detailed client and metric information.

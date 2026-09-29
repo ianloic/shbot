@@ -73,8 +73,14 @@ blocks:
 
 ### `[daemon]`
 
-- `idle_timeout_sec` (Default: `300`): The number of seconds the background
-  daemon should continue running after all active shells have disconnected.
+- `idle_timeout_sec` (Default: `300`): The number of seconds after which the
+  daemon disconnects a client connection that has exchanged no commands or
+  updates. Shells reconnect automatically on their next prompt, so idle sessions
+  resume seamlessly.
+- `command_timeout_sec` (Default: `60`): The maximum number of seconds a
+  `source.command` task may run before the daemon kills it. Protects the daemon
+  from hanging tasks that would otherwise accumulate across periodic or
+  file-watch triggers.
 
 ### `[state.<name>]`
 
@@ -227,6 +233,33 @@ The array indices map exactly to the standard `gitstatus` plugin variables:
 25. `num_assume_unchanged`
 26. `commit_encoding`
 27. `commit_summary`
+
+---
+
+## Security
+
+`shbot` was built with a defensive posture around its local attack surface:
+
+- **Peer-credential authentication.** Every socket connection is verified with
+  kernel `SO_PEERCRED` credentials. Connections from other users are rejected,
+  and a client can only register the PID the kernel says it owns, so another
+  local process cannot impersonate your shell or hijack its subscriptions.
+- **Owner-only permissions.** The socket, state directory, and log files are
+  created with `0600`/`0700` permissions regardless of the inherited umask.
+- **Protocol injection resistance.** Update payloads are percent-encoded on the
+  wire, so task output, file contents, or Git data (e.g. remote URLs from a
+  cloned repository) can never forge additional protocol messages or spoof
+  `VCS_STATUS_*` values in your shell. The plugin refuses to send commands
+  containing raw newlines.
+- **Resource bounds.** The daemon caps line length, connection count, watched
+  directories, event queue size, task runtime, and task output size, and never
+  recursively watches system roots like `/` or `/proc`.
+
+> **Caveat:** by design, `source.command` tasks run with your user privileges in
+> the directories your shells visit. If you configure a task that executes
+> repo-local tooling, entering a hostile repository could run code from it — the
+> same trust you extend when running `make` or `npm install` yourself. Keep
+> unscoped tasks limited to trusted commands if this matters to you.
 
 ---
 

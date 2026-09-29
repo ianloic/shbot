@@ -3,6 +3,43 @@
 This document tracks incomplete architectural features and future improvements
 required to make `shbot` production-ready.
 
+## Security Hardening
+
+- [x] **Peer-credential authentication on the socket**: Reject foreign-uid
+      connections via `SO_PEERCRED` and bind `hello <pid>` registrations to the
+      kernel-provided pid, preventing PID spoofing and client hijacking.
+- [x] **Owner-only file permissions**: Create the socket (`0600`), state
+      directory (`0700`), and log files (`0600`) explicitly instead of relying
+      on the inherited umask.
+- [x] **Protocol payload escaping**: Percent-encode newlines, carriage returns,
+      unit separators, and NULs in `update` payloads so repo-controlled data
+      (git remote URLs, commit summaries, task output) cannot forge protocol
+      lines in the shell; decode symmetrically in the Zsh plugin.
+- [x] **Remove `eval` from the plugin**: Replace the eval-based VCS field split
+      with a literal string-splitting loop.
+- [x] **Reject newline injection from the shell**: `_shbot_send` refuses
+      commands containing raw newlines (e.g. from a `$PWD` with an embedded
+      newline).
+- [x] **Resource bounds**: 64 KiB line cap, 128-connection cap, idle timeout
+      enforcement, command timeout with kill-on-drop, 64 KiB output cap,
+      in-flight evaluation dedup, bounded watcher event queue, 256-watch cap,
+      and refusal to recursively watch `/`, `/proc`, `/sys`, `/dev`, `/run`.
+- [x] **Single-instance socket safety**: A second daemon refuses to bind over a
+      live daemon's socket instead of unlinking it.
+- [x] **install.sh hardening**: Correct the plugin filename, shell-quote the
+      sourced path, and enable `set -euo pipefail`.
+- [x] **systemd hardening**: Add sandboxing directives (UMask, NoNewPrivileges,
+      ProtectSystem, PrivateTmp, kernel protections, empty capability set).
+- [x] **CI hygiene**: Remove the workflow step that dumped all environment
+      variables into logs; scope test cleanup kills to exact daemon PIDs.
+- [x] **Supply-chain pinning**: Pin all `mise` tool versions, add a sha256
+      integrity pin to the dprint plugin, and set `publish = false`.
+- [ ] **Close-on-exec for the shell's socket fd**: Zsh's `zsocket` does not set
+      `FD_CLOEXEC`, so every child process inherits the shell's daemon
+      connection. The daemon-side pid binding prevents impersonation, but the fd
+      still lets children read pushed updates and hold dead shells "connected".
+      Needs a zsh-side solution or an upstream feature.
+
 ## Technical Debt & Refactoring
 
 - [x] **Replace `sleep` in Integration Tests**: Refactor the integration test
