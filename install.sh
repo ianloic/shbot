@@ -15,7 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-set -e
+set -euo pipefail
 
 echo "Installing shbot binary to ~/.cargo/bin..."
 cargo install --path daemon
@@ -31,16 +31,19 @@ systemctl --user enable --now shbot.socket
 
 echo "Checking ~/.zshrc configuration..."
 ZSHRC="$HOME/.zshrc"
-PLUGIN_SRC="$(pwd)/zsh/shbot.zsh"
+PLUGIN_SRC="$(pwd)/zsh/shbot.plugin.zsh"
 
-if ! grep -q "source .*shbot.zsh" "$ZSHRC" 2>/dev/null; then
-    echo "Adding shbot plugin to ~/.zshrc..."
-    echo "" >> "$ZSHRC"
-    echo "# shbot plugin hook" >> "$ZSHRC"
-    echo "source \"$PLUGIN_SRC\"" >> "$ZSHRC"
-    echo "Successfully updated ~/.zshrc."
+if ! grep -q "source .*shbot.plugin.zsh" "$ZSHRC" 2>/dev/null; then
+	echo "Adding shbot plugin to ~/.zshrc..."
+	# Shell-quote the path so it evaluates safely as zsh code even when the
+	# checkout directory contains spaces, quotes, or other metacharacters.
+	ESCAPED_PLUGIN_SRC="'"$(printf '%s' "$PLUGIN_SRC" | sed "s/'/'\\\\''/g")"'"
+	echo "" >>"$ZSHRC"
+	echo "# shbot plugin hook" >>"$ZSHRC"
+	echo "source $ESCAPED_PLUGIN_SRC" >>"$ZSHRC"
+	echo "Successfully updated ~/.zshrc."
 else
-    echo "shbot plugin is already configured in ~/.zshrc."
+	echo "shbot plugin is already configured in ~/.zshrc."
 fi
 
 echo ""

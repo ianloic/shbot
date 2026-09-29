@@ -14,6 +14,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use crate::config::Config;
 use crate::error::Result;
+use crate::error::ShbotError;
 use crate::protocol::Command;
 use crate::state::{DaemonState, Pid};
 use crate::watcher::SyncWatcher;
@@ -22,6 +23,7 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener as StdUnixListener;
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
@@ -113,6 +115,12 @@ pub async fn run_server(
             ensure_owner_only_dir(p)?;
         }
         if socket_path.exists() {
+            if StdUnixStream::connect(&socket_path).is_ok() {
+                return Err(ShbotError::Custom(format!(
+                    "refusing to bind {:?}: another daemon is already listening",
+                    socket_path
+                )));
+            }
             fs::remove_file(&socket_path)?;
         }
 
@@ -777,6 +785,55 @@ mod tests {
         assert!(state.get_cwd(real_pid).await.is_none());
 
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_run_server_refuses_to_steal_live_socket() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let socket_path = temp_dir.path().join("busy.socket");
+
+        let state = DaemonState::new();
+        let watcher = SyncWatcher::new();
+        let (config_tx, config_rx) = tokio::sync::watch::channel(Config::default());
+        watcher.start(state.clone(), config_rx.clone()).unwrap();
+
+        let first = tokio::spawn(run_server(
+            state.clone(),
+            config_rx,
+            config_tx,
+            watcher.clone(),
+            socket_path.clone(),
+            None,
+        ));
+
+        let mut connected = false;
+        for _ in 0..100_000 {
+            if UnixStream::connect(&socket_path).await.is_ok() {
+                connected = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(connected, "first server never started listening");
+
+        let (config_tx2, config_rx2) = tokio::sync::watch::channel(Config::default());
+        let second = tokio::spawn(run_server(
+            state,
+            config_rx2,
+            config_tx2,
+            watcher,
+            socket_path.clone(),
+            None,
+        ));
+
+        let result = second.await.unwrap();
+        assert!(
+            result.is_err(),
+            "second daemon must refuse to steal a live socket"
+        );
+        assert!(socket_path.exists(), "original socket must be untouched");
+
+        first.abort();
     }
 
     #[tokio::test]
