@@ -33,8 +33,6 @@ pub struct ClientInfo {
 
 #[derive(Debug)]
 pub struct ScopedState {
-    pub name: StateId,
-    pub scope_root: PathBuf,
     pub subscribers: RwLock<HashSet<Pid>>,
     pub last_value: RwLock<Option<String>>,
 }
@@ -242,8 +240,6 @@ impl DaemonState {
                 let state = scoped_states.entry(key.clone()).or_insert_with(|| {
                     newly_created_scopes.push(key.clone());
                     Arc::new(ScopedState {
-                        name: key.0.clone(),
-                        scope_root: key.1.clone(),
                         subscribers: RwLock::new(HashSet::new()),
                         last_value: RwLock::new(None),
                     })
@@ -478,8 +474,6 @@ mod tests {
         state.scoped_states.write().await.insert(
             (StateId::git(), path.clone()),
             Arc::new(ScopedState {
-                name: StateId::git(),
-                scope_root: path.clone(),
                 subscribers: tokio::sync::RwLock::new([1].into()),
                 last_value: tokio::sync::RwLock::new(None),
             }),
@@ -487,8 +481,6 @@ mod tests {
         state.scoped_states.write().await.insert(
             (StateId::from("other"), path.clone()),
             Arc::new(ScopedState {
-                name: StateId::from("other"),
-                scope_root: path.clone(),
                 subscribers: tokio::sync::RwLock::new([1].into()),
                 last_value: tokio::sync::RwLock::new(None),
             }),

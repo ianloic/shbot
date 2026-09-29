@@ -25,7 +25,7 @@ mod state;
 mod watcher;
 
 use crate::error::Result;
-use crate::server::LOG_RELOAD_HANDLE;
+use crate::server::{LOG_RELOAD_HANDLE, ensure_owner_only_dir, restrict_to_owner};
 use clap::Parser;
 use cli::{Cli, Commands};
 use std::env;
@@ -206,9 +206,10 @@ fn setup_logging(log_file: Option<&Path>) -> Result<()> {
     let format_layer = fmt::layer();
     if let Some(path) = log_file {
         if let Some(p) = path.parent() {
-            fs::create_dir_all(p)?;
+            ensure_owner_only_dir(p)?;
         }
         let file = File::create(path)?;
+        restrict_to_owner(path)?;
         tracing_subscriber::registry()
             .with(filter_layer)
             .with(format_layer.with_writer(file))
@@ -234,7 +235,7 @@ fn handle_connect() -> Result<()> {
     }
 
     let state_dir = socket_path.parent().unwrap().to_path_buf();
-    fs::create_dir_all(&state_dir)?;
+    ensure_owner_only_dir(&state_dir)?;
 
     // Clean up stale socket before binding
     if socket_path.exists() {
@@ -245,6 +246,7 @@ fn handle_connect() -> Result<()> {
     let log_file = state_dir.join(format!("{}.log", hostname));
 
     let stdout = fs::File::create(&log_file)?;
+    restrict_to_owner(&log_file)?;
     let stderr = stdout.try_clone()?;
 
     StdCommand::new(env::current_exe()?)

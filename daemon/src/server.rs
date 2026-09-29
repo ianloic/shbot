@@ -19,8 +19,10 @@ use crate::state::{DaemonState, Pid};
 use crate::watcher::SyncWatcher;
 use listenfd::ListenFd;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener as StdUnixListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -28,6 +30,24 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, Registry, reload::Handle};
 
 pub static LOG_RELOAD_HANDLE: OnceLock<Handle<EnvFilter, Registry>> = OnceLock::new();
+
+const OWNER_ONLY_FILE_MODE: u32 = 0o600;
+const OWNER_ONLY_DIR_MODE: u32 = 0o700;
+
+fn current_uid() -> Result<u32> {
+    Ok(fs::metadata("/proc/self")?.uid())
+}
+
+pub fn ensure_owner_only_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(OWNER_ONLY_DIR_MODE))?;
+    Ok(())
+}
+
+pub fn restrict_to_owner(path: &Path) -> Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(OWNER_ONLY_FILE_MODE))?;
+    Ok(())
+}
 
 pub async fn run_server(
     state: Arc<DaemonState>,
@@ -47,20 +67,41 @@ pub async fn run_server(
         std_listener.set_nonblocking(true)?;
         UnixListener::from_std(std_listener)?
     } else {
-        // Unbind previous socket if it exists
+        if let Some(p) = socket_path.parent() {
+            ensure_owner_only_dir(p)?;
+        }
         if socket_path.exists() {
             fs::remove_file(&socket_path)?;
-        } else if let Some(p) = socket_path.parent() {
-            fs::create_dir_all(p)?;
         }
 
         info!("Binding to socket: {:?}", socket_path);
-        UnixListener::bind(&socket_path)?
+        let listener = UnixListener::bind(&socket_path)?;
+        restrict_to_owner(&socket_path)?;
+        listener
     };
+
+    let daemon_uid = current_uid()?;
 
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                let cred = match stream.peer_cred() {
+                    Ok(cred) => cred,
+                    Err(e) => {
+                        warn!("Failed to read peer credentials: {}", e);
+                        continue;
+                    }
+                };
+                if cred.uid() != daemon_uid {
+                    warn!(
+                        "Rejecting connection from uid {} (daemon runs as uid {})",
+                        cred.uid(),
+                        daemon_uid
+                    );
+                    continue;
+                }
+                let peer_pid = cred.pid().map(|p| p as Pid);
+
                 let state_clone = state.clone();
                 let config_rx_clone = config_rx.clone();
                 let config_tx_clone = config_tx.clone();
@@ -72,6 +113,7 @@ pub async fn run_server(
                         config_rx_clone,
                         config_tx_clone,
                         watcher_clone,
+                        peer_pid,
                     )
                     .await
                     {
@@ -92,6 +134,7 @@ async fn handle_connection(
     config_rx: tokio::sync::watch::Receiver<Config>,
     config_tx: tokio::sync::watch::Sender<Config>,
     watcher: Arc<SyncWatcher>,
+    peer_pid: Option<Pid>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -131,6 +174,18 @@ async fn handle_connection(
 
         match command {
             Command::Hello(pid) => {
+                if peer_pid != Some(pid) {
+                    warn!(
+                        "Rejecting hello from pid {} (kernel peer pid: {:?})",
+                        pid, peer_pid
+                    );
+                    let _ = tx.try_send(format!(
+                        "error: pid {} does not match the connection owner\n",
+                        pid
+                    ));
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    break;
+                }
                 client_pid = Some(pid);
                 state.add_client(pid, PathBuf::new(), tx.clone()).await;
                 info!("Client connected: PID {}", pid);
@@ -255,7 +310,9 @@ mod tests {
         };
     }
 
-    async fn setup_server() -> (
+    async fn setup_server_with_peer(
+        peer_pid: Option<Pid>,
+    ) -> (
         UnixStream,
         tokio::task::JoinHandle<()>,
         Arc<DaemonState>,
@@ -271,16 +328,32 @@ mod tests {
         let state_clone = state.clone();
         let watcher_clone = watcher.clone();
         let server_task = tokio::spawn(async move {
-            let _ =
-                handle_connection(server, state_clone, config_rx, config_tx, watcher_clone).await;
+            let _ = handle_connection(
+                server,
+                state_clone,
+                config_rx,
+                config_tx,
+                watcher_clone,
+                peer_pid,
+            )
+            .await;
         });
 
         (client, server_task, state, watcher)
     }
 
+    async fn setup_server() -> (
+        UnixStream,
+        tokio::task::JoinHandle<()>,
+        Arc<DaemonState>,
+        Arc<SyncWatcher>,
+    ) {
+        setup_server_with_peer(None).await
+    }
+
     #[tokio::test]
     async fn test_server_hello_cd() {
-        let (mut client, _server_task, state, _watcher) = setup_server().await;
+        let (mut client, _server_task, state, _watcher) = setup_server_with_peer(Some(12345)).await;
 
         let mut rx = state.test_events_tx.subscribe();
         client.write_all(b"hello 12345\n").await.unwrap();
@@ -331,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_invalidate() {
-        let (mut client, _server_task, state, _watcher) = setup_server().await;
+        let (mut client, _server_task, state, _watcher) = setup_server_with_peer(Some(12345)).await;
 
         let mut rx = state.test_events_tx.subscribe();
         client.write_all(b"hello 12345\n").await.unwrap();
@@ -384,7 +457,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_client_disconnect_unwatches() {
-        let (mut client, server_task, state, watcher) = setup_server().await;
+        let (mut client, server_task, state, watcher) = setup_server_with_peer(Some(9999)).await;
 
         let temp_dir = tempfile::tempdir().unwrap();
         StdCommand::new("git")
@@ -446,11 +519,18 @@ mod tests {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("debug")
             .try_init();
-        let (mut client1, _server_task1, state, watcher) = setup_server().await;
+        let (mut client1, _server_task1, state, watcher) = setup_server_with_peer(Some(111)).await;
         let (mut client2, _server_task2) = {
             let (c, s) = UnixStream::pair().unwrap();
             let (tx, rx) = tokio::sync::watch::channel(Config::default());
-            let t = tokio::spawn(handle_connection(s, state.clone(), rx, tx, watcher.clone()));
+            let t = tokio::spawn(handle_connection(
+                s,
+                state.clone(),
+                rx,
+                tx,
+                watcher.clone(),
+                Some(222),
+            ));
             (c, t)
         };
 
@@ -551,7 +631,72 @@ mod tests {
             tokio::sync::watch::channel(Config::default()).1,
             tokio::sync::watch::channel(Config::default()).0,
             _watcher.clone(),
+            None,
         ));
         // We don't have a handle to client2 here, actually we do but we just made a dummy. Let's ignore it for now.
+    }
+
+    #[tokio::test]
+    async fn test_server_hello_pid_mismatch() {
+        let (mut client, server_task, state, _watcher) = setup_server_with_peer(Some(4242)).await;
+
+        client.write_all(b"hello 12345\n").await.unwrap();
+
+        let mut buf = String::new();
+        client.read_to_string(&mut buf).await.unwrap();
+        assert!(buf.contains("error: pid 12345 does not match the connection owner"));
+        assert!(state.clients.read().await.is_empty());
+
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn test_run_server_socket_mode_and_peer_credentials() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test.socket");
+
+        let state = DaemonState::new();
+        let watcher = SyncWatcher::new();
+        let (config_tx, config_rx) = tokio::sync::watch::channel(Config::default());
+        watcher.start(state.clone(), config_rx.clone()).unwrap();
+
+        let server_task = tokio::spawn(run_server(
+            state.clone(),
+            config_rx,
+            config_tx,
+            watcher.clone(),
+            socket_path.clone(),
+            None,
+        ));
+
+        let mut client = None;
+        for _ in 0..100_000 {
+            if let Ok(stream) = UnixStream::connect(&socket_path).await {
+                client = Some(stream);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let mut client = client.expect("server never started listening");
+
+        let mode = fs::metadata(&socket_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        let real_pid = std::process::id();
+        let mut rx = state.test_events_tx.subscribe();
+        client
+            .write_all(format!("hello {}\n", real_pid).as_bytes())
+            .await
+            .unwrap();
+        let _ = rx.recv().await;
+        assert_eq!(state.get_cwd(real_pid).await, Some(PathBuf::from("")));
+
+        client.write_all(b"hello 1\n").await.unwrap();
+        let mut buf = String::new();
+        client.read_to_string(&mut buf).await.unwrap();
+        assert!(buf.contains("error: pid 1 does not match the connection owner"));
+        assert!(state.get_cwd(real_pid).await.is_none());
+
+        server_task.abort();
     }
 }

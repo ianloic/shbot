@@ -277,8 +277,6 @@ mod tests {
         state.scoped_states.write().await.insert(
             (StateId::from("test_1"), PathBuf::from("/")),
             Arc::new(ScopedState {
-                name: StateId::from("test_1"),
-                scope_root: PathBuf::from("/"),
                 subscribers: RwLock::new(HashSet::new()),
                 last_value: RwLock::new(None),
             }),
@@ -372,8 +370,6 @@ mod tests {
         state.scoped_states.write().await.insert(
             (StateId::from("test_fail"), PathBuf::from("/")),
             Arc::new(ScopedState {
-                name: StateId::from("test_fail"),
-                scope_root: PathBuf::from("/"),
                 subscribers: RwLock::new(HashSet::new()),
                 last_value: RwLock::new(None),
             }),
