@@ -44,6 +44,7 @@ pub struct DaemonState {
     pub git_latencies: RwLock<HashMap<PathBuf, u64>>,
     pub last_trigger_refresh_micros: AtomicU64,
     pub scoped_states: RwLock<HashMap<(StateId, PathBuf), Arc<ScopedState>>>,
+    pub in_flight: RwLock<HashSet<(StateId, PathBuf)>>,
     #[cfg(test)]
     pub test_events_tx: tokio::sync::broadcast::Sender<()>,
 }
@@ -55,9 +56,22 @@ impl DaemonState {
             git_latencies: RwLock::new(HashMap::new()),
             last_trigger_refresh_micros: AtomicU64::new(0),
             scoped_states: RwLock::new(HashMap::new()),
+            in_flight: RwLock::new(HashSet::new()),
             #[cfg(test)]
             test_events_tx: tokio::sync::broadcast::channel(100).0,
         })
+    }
+
+    pub async fn begin_evaluation(&self, name: &StateId, root: &Path) -> bool {
+        let mut in_flight = self.in_flight.write().await;
+        in_flight.insert((name.clone(), root.to_path_buf()))
+    }
+
+    pub async fn end_evaluation(&self, name: &StateId, root: &Path) {
+        self.in_flight
+            .write()
+            .await
+            .remove(&(name.clone(), root.to_path_buf()));
     }
 
     pub async fn add_client(&self, pid: Pid, cwd: PathBuf, sender: mpsc::Sender<String>) {

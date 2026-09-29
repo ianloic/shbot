@@ -17,17 +17,127 @@ use crate::config::{Config, StateId, StateSource};
 use crate::git::get_git_state;
 use crate::state::DaemonState;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::{Duration, sleep};
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
+const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(1);
+
+async fn read_capped<R>(pipe: R) -> Vec<u8>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut reader = pipe;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => {
+                // Keep at most MAX + 1 bytes (the extra byte signals
+                // truncation) but keep draining so the child can exit
+                // instead of blocking on a full pipe.
+                if buf.len() < MAX_COMMAND_OUTPUT_BYTES + 1 {
+                    let remaining = MAX_COMMAND_OUTPUT_BYTES + 1 - buf.len();
+                    let keep = n.min(remaining);
+                    buf.extend_from_slice(&chunk[..keep]);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    buf
+}
+
+async fn run_command(command: &str, cwd: &Path, timeout: Duration) -> Option<String> {
+    let mut child = match Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            error!("Command source failed to execute '{}': {}", command, e);
+            return None;
+        }
+    };
+
+    let stdout_handle = child.stdout.take().map(|p| tokio::spawn(read_capped(p)));
+    let stderr_handle = child.stderr.take().map(|p| tokio::spawn(read_capped(p)));
+
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(status) => status,
+        Err(_) => {
+            warn!(
+                "Command '{}' timed out after {:?}; killing",
+                command, timeout
+            );
+            let _ = child.kill().await;
+            if let Some(handle) = stdout_handle {
+                handle.abort();
+            }
+            if let Some(handle) = stderr_handle {
+                handle.abort();
+            }
+            return None;
+        }
+    };
+
+    let join_pipe = |handle: Option<tokio::task::JoinHandle<Vec<u8>>>| async {
+        match handle {
+            Some(handle) => match tokio::time::timeout(PIPE_DRAIN_GRACE, handle).await {
+                Ok(Ok(bytes)) => bytes,
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        }
+    };
+
+    let stdout = join_pipe(stdout_handle).await;
+    let stderr = join_pipe(stderr_handle).await;
+
+    match status {
+        Ok(status) => {
+            if status.success() {
+                if stdout.len() > MAX_COMMAND_OUTPUT_BYTES {
+                    warn!(
+                        "Command '{}' output exceeded {} bytes; truncating",
+                        command, MAX_COMMAND_OUTPUT_BYTES
+                    );
+                }
+                Some(String::from_utf8_lossy(&stdout).trim().to_string())
+            } else {
+                error!(
+                    "Command source '{}' failed: {}",
+                    command,
+                    String::from_utf8_lossy(&stderr)
+                );
+                None
+            }
+        }
+        Err(e) => {
+            error!("Command source '{}' failed to wait: {}", command, e);
+            None
+        }
+    }
+}
 
 pub async fn evaluate_state_source(
     name: &StateId,
     source: &StateSource,
     cwd: &Path,
     state: &DaemonState,
+    command_timeout: Duration,
 ) -> Option<String> {
     match source {
         StateSource::File { file } => {
@@ -45,29 +155,7 @@ pub async fn evaluate_state_source(
                 }
             }
         }
-        StateSource::Command { command } => {
-            match Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .current_dir(cwd)
-                .output()
-                .await
-            {
-                Ok(output) => {
-                    if output.status.success() {
-                        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-                    } else {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        error!("Command source '{}' failed: {}", name, stderr);
-                        None
-                    }
-                }
-                Err(e) => {
-                    error!("Command source '{}' failed to execute: {}", name, e);
-                    None
-                }
-            }
-        }
+        StateSource::Command { command } => run_command(command, cwd, command_timeout).await,
         StateSource::Native { native } => {
             if native == "git" {
                 let start_git = Instant::now();
@@ -160,11 +248,27 @@ pub async fn evaluate_scoped_state(
     config: &Config,
 ) {
     if let Some(state_config) = config.state.get(name) {
-        if let Some(stdout) =
-            evaluate_state_source(name, &state_config.source, scope_root, state).await
+        if !state.begin_evaluation(name, scope_root).await {
+            tracing::debug!(
+                "Skipping duplicate evaluation of state '{}' at {:?}",
+                name,
+                scope_root
+            );
+            return;
+        }
+        let command_timeout = Duration::from_secs(config.daemon.command_timeout_sec);
+        if let Some(stdout) = evaluate_state_source(
+            name,
+            &state_config.source,
+            scope_root,
+            state,
+            command_timeout,
+        )
+        .await
         {
             state.update_scoped_state(name, scope_root, &stdout).await;
         }
+        state.end_evaluation(name, scope_root).await;
     }
 }
 
@@ -374,7 +478,6 @@ mod tests {
                 last_value: RwLock::new(None),
             }),
         );
-
         let (_config_tx, config_rx) = watch::channel(config);
         start_timeout_tasks(state.clone(), config_rx);
 
@@ -382,6 +485,75 @@ mod tests {
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
+    }
+
+    #[tokio::test]
+    async fn test_run_command_success() {
+        let temp = tempfile::tempdir().unwrap();
+        let out = run_command("echo hi", temp.path(), Duration::from_secs(10)).await;
+        assert_eq!(out.as_deref(), Some("hi"));
+    }
+
+    #[tokio::test]
+    async fn test_run_command_failure_returns_none() {
+        let temp = tempfile::tempdir().unwrap();
+        let out = run_command("exit 1", temp.path(), Duration::from_secs(10)).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_run_command_timeout_kills_child() {
+        let temp = tempfile::tempdir().unwrap();
+        let start = Instant::now();
+        let out = run_command("sleep 60", temp.path(), Duration::from_millis(100)).await;
+        assert!(out.is_none());
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "timeout must not wait for the full command duration"
+        );
+
+        let ps = std::process::Command::new("ps")
+            .arg("-ef")
+            .output()
+            .unwrap();
+        let ps_output = String::from_utf8_lossy(&ps.stdout);
+        let test_pid = std::process::id().to_string();
+        assert!(
+            !ps_output
+                .lines()
+                .any(|l| l.contains("sleep 60") && l.contains(&test_pid)),
+            "timed-out child must be killed, not left orphaned"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_command_output_capped() {
+        let temp = tempfile::tempdir().unwrap();
+        let out = run_command("seq 1 50000", temp.path(), Duration::from_secs(5)).await;
+        let out = out.expect("command must succeed");
+        assert!(
+            out.len() <= MAX_COMMAND_OUTPUT_BYTES + 8,
+            "output must be capped, got {} bytes",
+            out.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_evaluation_in_flight_dedup() {
+        let state = DaemonState::new();
+        let name = StateId::from("dedup");
+        let root = PathBuf::from("/tmp/dedup");
+
+        assert!(state.begin_evaluation(&name, &root).await);
+        assert!(
+            !state.begin_evaluation(&name, &root).await,
+            "second evaluation of the same scope must be skipped"
+        );
+        state.end_evaluation(&name, &root).await;
+        assert!(
+            state.begin_evaluation(&name, &root).await,
+            "evaluation must be re-entrant after completion"
+        );
     }
 
     #[tokio::test]

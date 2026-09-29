@@ -73,18 +73,25 @@ pub struct Config {
 pub struct DaemonConfig {
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout_sec: u64,
+    #[serde(default = "default_command_timeout")]
+    pub command_timeout_sec: u64,
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             idle_timeout_sec: default_idle_timeout(),
+            command_timeout_sec: default_command_timeout(),
         }
     }
 }
 
 fn default_idle_timeout() -> u64 {
     300 // 5 minutes
+}
+
+fn default_command_timeout() -> u64 {
+    60 // 1 minute
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -192,6 +199,7 @@ mod tests {
         temp_env::with_var("HOME", Some(temp_home.path()), || {
             let config = Config::load().expect("Should fall back to default when no file exists");
             assert_eq!(config.daemon.idle_timeout_sec, 300);
+            assert_eq!(config.daemon.command_timeout_sec, 60);
             assert_eq!(config.state.len(), 1);
             assert!(config.state.contains_key("git"));
         });

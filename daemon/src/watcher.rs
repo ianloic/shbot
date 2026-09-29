@@ -26,7 +26,21 @@ use std::sync::Arc;
 use tokio::time::{Duration, sleep};
 
 use std::sync::Mutex as StdMutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
+
+const MAX_WATCHED_PATHS: usize = 256;
+const EVENT_CHANNEL_CAPACITY: usize = 1024;
+
+const UNWATCHABLE_PREFIXES: [&str; 4] = ["/proc", "/sys", "/dev", "/run"];
+
+fn is_watchable_root(path: &Path) -> bool {
+    if path == Path::new("/") {
+        return false;
+    }
+    !UNWATCHABLE_PREFIXES
+        .iter()
+        .any(|root| path.starts_with(root))
+}
 
 pub struct SyncWatcher {
     watcher: StdMutex<Option<RecommendedWatcher>>,
@@ -46,7 +60,7 @@ impl SyncWatcher {
         state: Arc<DaemonState>,
         config_rx: tokio::sync::watch::Receiver<Config>,
     ) -> Result<()> {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<PathBuf>(EVENT_CHANNEL_CAPACITY);
 
         let watcher = RecommendedWatcher::new(
             move |res: notify::Result<Event>| {
@@ -57,7 +71,11 @@ impl SyncWatcher {
                         return;
                     }
                     for path in event.paths {
-                        let _ = tx.send(path);
+                        // Drop events when the queue is full rather than
+                        // growing without bound during event storms.
+                        if tx.try_send(path).is_err() {
+                            debug!("Watcher event queue full; dropping event");
+                        }
                     }
                 }
             },
@@ -117,8 +135,21 @@ impl SyncWatcher {
             return;
         }
 
+        if !is_watchable_root(path) {
+            warn!("Refusing to recursively watch sensitive root {:?}", path);
+            return;
+        }
+
         let mut paths = self.watched_paths.lock().unwrap();
         if paths.contains(path) {
+            return;
+        }
+
+        if paths.len() >= MAX_WATCHED_PATHS {
+            warn!(
+                "Watch limit of {} paths reached; not watching {:?}",
+                MAX_WATCHED_PATHS, path
+            );
             return;
         }
 
@@ -223,5 +254,54 @@ mod tests {
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
+    }
+
+    #[tokio::test]
+    async fn test_watcher_refuses_sensitive_roots() {
+        use crate::config::Config;
+        use crate::state::DaemonState;
+
+        let watcher = SyncWatcher::new();
+        let state = DaemonState::new();
+        let (_config_tx, config_rx) = tokio::sync::watch::channel(Config::default());
+
+        watcher.start(state, config_rx).unwrap();
+
+        for root in [
+            "/",
+            "/proc",
+            "/proc/self",
+            "/sys",
+            "/dev",
+            "/dev/null",
+            "/run",
+        ] {
+            watcher.watch(std::path::Path::new(root), &[]);
+        }
+
+        assert_eq!(watcher.get_watch_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_watcher_watch_limit() {
+        use crate::config::Config;
+        use crate::state::DaemonState;
+
+        let watcher = SyncWatcher::new();
+        let state = DaemonState::new();
+        let (_config_tx, config_rx) = tokio::sync::watch::channel(Config::default());
+
+        watcher.start(state, config_rx).unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut paths = watcher.watched_paths.lock().unwrap();
+        for i in 0..MAX_WATCHED_PATHS {
+            paths.insert(temp.path().join(format!("dummy_{}", i)));
+        }
+        drop(paths);
+
+        let extra = temp.path().join("extra");
+        watcher.watch(&extra, &[]);
+        assert_eq!(watcher.get_watch_count(), MAX_WATCHED_PATHS);
     }
 }

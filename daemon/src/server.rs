@@ -23,9 +23,11 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener as StdUnixListener;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Semaphore;
+use tokio::time::Instant;
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, Registry, reload::Handle};
 
@@ -33,6 +35,46 @@ pub static LOG_RELOAD_HANDLE: OnceLock<Handle<EnvFilter, Registry>> = OnceLock::
 
 const OWNER_ONLY_FILE_MODE: u32 = 0o600;
 const OWNER_ONLY_DIR_MODE: u32 = 0o700;
+const MAX_LINE_BYTES: usize = 64 * 1024;
+const MAX_CONNECTIONS: usize = 128;
+
+enum LineOutcome {
+    Line,
+    Eof,
+    Oversized,
+}
+
+async fn read_capped_line<R>(
+    reader: &mut BufReader<R>,
+    buf: &mut Vec<u8>,
+) -> std::io::Result<LineOutcome>
+where
+    R: AsyncRead + Unpin,
+{
+    buf.clear();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(if buf.is_empty() {
+                LineOutcome::Eof
+            } else {
+                LineOutcome::Line
+            });
+        }
+        let newline = available.iter().position(|&b| b == b'\n');
+        let end = newline.map_or(available.len(), |i| i + 1);
+        let has_newline = newline.is_some();
+        buf.extend_from_slice(&available[..end]);
+        reader.consume(end);
+        if buf.len() > MAX_LINE_BYTES {
+            return Ok(LineOutcome::Oversized);
+        }
+        if has_newline {
+            buf.pop();
+            return Ok(LineOutcome::Line);
+        }
+    }
+}
 
 fn current_uid() -> Result<u32> {
     Ok(fs::metadata("/proc/self")?.uid())
@@ -81,6 +123,7 @@ pub async fn run_server(
     };
 
     let daemon_uid = current_uid()?;
+    let connection_slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
 
     loop {
         match listener.accept().await {
@@ -102,11 +145,23 @@ pub async fn run_server(
                 }
                 let peer_pid = cred.pid().map(|p| p as Pid);
 
+                let permit = match connection_slots.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        warn!(
+                            "Rejecting connection: at capacity ({} active)",
+                            MAX_CONNECTIONS
+                        );
+                        continue;
+                    }
+                };
+
                 let state_clone = state.clone();
                 let config_rx_clone = config_rx.clone();
                 let config_tx_clone = config_tx.clone();
                 let watcher_clone = watcher.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     if let Err(e) = handle_connection(
                         stream,
                         state_clone,
@@ -138,35 +193,59 @@ async fn handle_connection(
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    let mut line = String::new();
+    let mut raw = Vec::with_capacity(128);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(100);
+
+    let idle_timeout = tokio::time::Duration::from_secs(config_rx.borrow().daemon.idle_timeout_sec);
+    let deadline: Arc<StdMutex<Instant>> = Arc::new(StdMutex::new(Instant::now() + idle_timeout));
 
     // We don't know the PID until the client says `hello <pid>`
     let mut client_pid: Option<Pid> = None;
 
     // Spawn a writer task for this connection
+    let writer_deadline = deadline.clone();
     let writer_task = tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         while let Some(msg) = rx.recv().await {
             if writer.write_all(msg.as_bytes()).await.is_err() {
                 break;
             }
+            *writer_deadline.lock().unwrap() = Instant::now() + idle_timeout;
         }
     });
 
     loop {
-        line.clear();
-        let bytes_read = match reader.read_line(&mut line).await {
-            Ok(b) => b,
+        let next_deadline = *deadline.lock().unwrap();
+        let outcome = tokio::select! {
+            biased;
+            res = read_capped_line(&mut reader, &mut raw) => res,
+            _ = tokio::time::sleep_until(next_deadline) => {
+                warn!("Idle timeout expired for client {:?}", client_pid);
+                break;
+            }
+        };
+
+        let line = match outcome {
+            Ok(LineOutcome::Eof) => break,
+            Ok(LineOutcome::Oversized) => {
+                warn!("Dropping connection: line exceeds {} bytes", MAX_LINE_BYTES);
+                break;
+            }
+            Ok(LineOutcome::Line) => match String::from_utf8(raw.clone()) {
+                Ok(line) => line,
+                Err(_) => {
+                    error!("Socket read error: invalid UTF-8");
+                    break;
+                }
+            },
             Err(e) => {
                 error!("Socket read error: {}", e);
                 break;
             }
         };
-        if bytes_read == 0 {
-            break; // EOF
-        }
+
+        *deadline.lock().unwrap() = Instant::now() + idle_timeout;
 
         let Some(command) = Command::parse(&line) else {
             continue;
@@ -698,5 +777,56 @@ mod tests {
         assert!(state.get_cwd(real_pid).await.is_none());
 
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_server_oversized_line_drops_connection() {
+        let (mut client, _server_task, state, _watcher) = setup_server().await;
+
+        let big = vec![b'A'; MAX_LINE_BYTES + 1];
+        client.write_all(&big).await.unwrap();
+
+        let mut buf = String::new();
+        let n = client.read_to_string(&mut buf).await.unwrap();
+        assert_eq!(n, 0, "connection must be dropped on oversized input");
+        assert!(state.clients.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_server_idle_timeout() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let state = DaemonState::new();
+        let watcher = SyncWatcher::new();
+
+        let mut config = Config::default();
+        config.daemon.idle_timeout_sec = 0;
+        let (config_tx, config_rx) = tokio::sync::watch::channel(config);
+        watcher.start(state.clone(), config_rx.clone()).unwrap();
+
+        let state_clone = state.clone();
+        let server_task = tokio::spawn(async move {
+            let _ = handle_connection(
+                server,
+                state_clone,
+                config_rx,
+                config_tx,
+                watcher,
+                Some(12345),
+            )
+            .await;
+        });
+
+        let mut client = client;
+        let mut rx = state.test_events_tx.subscribe();
+        client.write_all(b"hello 12345\n").await.unwrap();
+        let _ = rx.recv().await;
+
+        let _ = rx.recv().await;
+
+        assert!(
+            state.get_cwd(12345).await.is_none(),
+            "idle client must be disconnected"
+        );
+        let _ = server_task.await;
     }
 }
