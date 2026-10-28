@@ -310,6 +310,7 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::fs::symlink;
     use std::process::Command;
     use tempfile::tempdir;
 
@@ -349,11 +350,13 @@ mod tests {
         let (_, state) = get_git_state(root).unwrap().unwrap();
         assert_eq!(state.num_untracked, 1);
 
-        // Stage the file
+        // Stage the file (while repository still has an unborn HEAD)
         run_git(&["add", "test.txt"], root);
         let (_, state) = get_git_state(root).unwrap().unwrap();
         assert_eq!(state.num_staged, 1);
+        assert_eq!(state.num_staged_new, 1);
         assert_eq!(state.num_untracked, 0);
+        assert_eq!(state.index_size, 1);
 
         // Commit the file
         run_git(&["commit", "-m", "Initial commit"], root);
@@ -455,13 +458,17 @@ mod tests {
         // Push to set upstream
         run_git(&["push", "-u", "origin", "main"], local_root);
 
-        // check state
+        // check state (including push_remote fallback to upstream remote)
         let (_, state) = get_git_state(local_root).unwrap().unwrap();
         assert_eq!(state.remote_name, "origin");
         assert_eq!(state.remote_url, remote_url);
         assert_eq!(state.remote_branch, "main");
         assert_eq!(state.commits_ahead, 0);
         assert_eq!(state.commits_behind, 0);
+        assert_eq!(state.push_remote_name, "origin");
+        assert_eq!(state.push_remote_url, remote_url);
+        assert_eq!(state.push_commits_ahead, 0);
+        assert_eq!(state.push_commits_behind, 0);
 
         // Make another commit local to be ahead
         fs::write(local_root.join("test.txt"), "hello ahead").unwrap();
@@ -471,6 +478,8 @@ mod tests {
         let (_, state) = get_git_state(local_root).unwrap().unwrap();
         assert_eq!(state.commits_ahead, 1);
         assert_eq!(state.commits_behind, 0);
+        assert_eq!(state.push_commits_ahead, 1);
+        assert_eq!(state.push_commits_behind, 0);
 
         // set push remote differently
         run_git(&["config", "branch.main.pushRemote", "origin"], local_root);
@@ -683,5 +692,411 @@ mod tests {
 
         let (_, state) = get_git_state(root).unwrap().unwrap();
         assert_eq!(state.index_size, 0); // Error branch leaves it 0
+    }
+
+    #[test]
+    fn test_git_discover_from_subdirectory() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init", "--initial-branch=main"], root);
+        run_git(&["config", "user.name", "Test User"], root);
+        run_git(&["config", "user.email", "test@example.com"], root);
+
+        fs::write(root.join("test.txt"), "hello").unwrap();
+        run_git(&["add", "test.txt"], root);
+        run_git(&["commit", "-m", "Initial commit"], root);
+
+        let sub = root.join("a").join("b").join("c");
+        fs::create_dir_all(&sub).unwrap();
+
+        let (root_from_top, state_from_top) = get_git_state(root).unwrap().unwrap();
+        let (root_from_sub, state_from_sub) = get_git_state(&sub).unwrap().unwrap();
+
+        assert_eq!(root_from_sub, root_from_top);
+        assert_eq!(state_from_sub, state_from_top);
+    }
+
+    #[test]
+    fn test_git_branch_with_slashes_and_multiline_commit_summary() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init", "--initial-branch=main"], root);
+        run_git(&["config", "user.name", "Test User"], root);
+        run_git(&["config", "user.email", "test@example.com"], root);
+
+        run_git(&["checkout", "-b", "feature/sub/topic"], root);
+        fs::write(root.join("test.txt"), "hello").unwrap();
+        run_git(&["add", "test.txt"], root);
+        run_git(
+            &[
+                "commit",
+                "-m",
+                "First line summary\n\nSecond paragraph\nThird line",
+            ],
+            root,
+        );
+
+        let rev_parse = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        let expected_sha = String::from_utf8_lossy(&rev_parse.stdout)
+            .trim()
+            .to_string();
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.local_branch, "feature/sub/topic");
+        assert_eq!(state.commit, expected_sha);
+        assert_eq!(state.commit.len(), 40);
+        assert_eq!(state.commit_summary, "First line summary");
+    }
+
+    #[test]
+    fn test_git_tags_lightweight_annotated_and_non_head() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init", "--initial-branch=main"], root);
+        run_git(&["config", "user.name", "Test User"], root);
+        run_git(&["config", "user.email", "test@example.com"], root);
+
+        fs::write(root.join("test.txt"), "v1").unwrap();
+        run_git(&["add", "test.txt"], root);
+        run_git(&["commit", "-m", "commit 1"], root);
+        run_git(&["tag", "-a", "v1.0", "-m", "Annotated 1.0"], root);
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.tag, "v1.0");
+
+        // Advance HEAD past v1.0; exact-match tag should now be empty
+        fs::write(root.join("test.txt"), "v2").unwrap();
+        run_git(&["commit", "-am", "commit 2"], root);
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.tag, "");
+
+        // Create a lightweight tag on HEAD
+        run_git(&["tag", "v2.0-light"], root);
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.tag, "v2.0-light");
+    }
+
+    #[test]
+    fn test_git_stashes() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init", "--initial-branch=main"], root);
+        run_git(&["config", "user.name", "Test User"], root);
+        run_git(&["config", "user.email", "test@example.com"], root);
+
+        fs::write(root.join("test.txt"), "initial").unwrap();
+        run_git(&["add", "test.txt"], root);
+        run_git(&["commit", "-m", "initial"], root);
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.stashes, 0);
+
+        fs::write(root.join("test.txt"), "change 1").unwrap();
+        run_git(&["stash", "push", "-m", "first stash"], root);
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.stashes, 1);
+
+        fs::write(root.join("test.txt"), "change 2").unwrap();
+        run_git(&["stash", "push", "-m", "second stash"], root);
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.stashes, 2);
+
+        run_git(&["stash", "pop"], root);
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.stashes, 1);
+    }
+
+    #[test]
+    fn test_git_index_size_and_mixed_staged_unstaged() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init", "--initial-branch=main"], root);
+        run_git(&["config", "user.name", "Test User"], root);
+        run_git(&["config", "user.email", "test@example.com"], root);
+
+        fs::write(root.join("a.txt"), "a1").unwrap();
+        fs::write(root.join("b.txt"), "b1").unwrap();
+        run_git(&["add", "a.txt", "b.txt"], root);
+        run_git(&["commit", "-m", "initial"], root);
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.index_size, 2);
+        assert_eq!(state.num_staged, 0);
+        assert_eq!(state.num_staged_new, 0);
+        assert_eq!(state.num_staged_deleted, 0);
+        assert_eq!(state.num_unstaged, 0);
+        assert_eq!(state.num_unstaged_deleted, 0);
+
+        // Stage a brand new file c.txt, then also modify it in worktree (AM)
+        fs::write(root.join("c.txt"), "c1").unwrap();
+        run_git(&["add", "c.txt"], root);
+        fs::write(root.join("c.txt"), "c2").unwrap();
+
+        // Stage a modification to a.txt, then modify it again in worktree (MM)
+        fs::write(root.join("a.txt"), "a2").unwrap();
+        run_git(&["add", "a.txt"], root);
+        fs::write(root.join("a.txt"), "a3").unwrap();
+
+        // Stage a modification to b.txt, then delete it in worktree (MD)
+        fs::write(root.join("b.txt"), "b2").unwrap();
+        run_git(&["add", "b.txt"], root);
+        fs::remove_file(root.join("b.txt")).unwrap();
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.index_size, 3);
+        assert_eq!(state.num_staged, 3);
+        assert_eq!(state.num_staged_new, 1);
+        assert_eq!(state.num_staged_deleted, 0);
+        assert_eq!(state.num_unstaged, 3);
+        assert_eq!(state.num_unstaged_deleted, 1);
+    }
+
+    #[test]
+    fn test_git_gitignore_and_untracked_dirs() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init", "--initial-branch=main"], root);
+        run_git(&["config", "user.name", "Test User"], root);
+        run_git(&["config", "user.email", "test@example.com"], root);
+
+        fs::write(root.join(".gitignore"), "*.log\nbuild/\n").unwrap();
+        let tracked_dir = root.join("tracked_dir");
+        fs::create_dir_all(&tracked_dir).unwrap();
+        fs::write(tracked_dir.join("tracked.txt"), "ok").unwrap();
+        run_git(&["add", ".gitignore", "tracked_dir/tracked.txt"], root);
+        run_git(&["commit", "-m", "initial"], root);
+
+        // Create ignored file and ignored directory
+        fs::write(root.join("debug.log"), "ignored").unwrap();
+        fs::create_dir_all(root.join("build")).unwrap();
+        fs::write(root.join("build").join("out.bin"), "ignored").unwrap();
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.num_untracked, 0);
+
+        // Create an entirely untracked directory with 2 files inside -> should count as 1
+        let untracked_dir = root.join("untracked_dir");
+        fs::create_dir_all(&untracked_dir).unwrap();
+        fs::write(untracked_dir.join("u1.txt"), "1").unwrap();
+        fs::write(untracked_dir.join("u2.txt"), "2").unwrap();
+
+        // Create 2 untracked files inside the already-tracked directory -> should count as 2
+        fs::write(tracked_dir.join("new1.txt"), "1").unwrap();
+        fs::write(tracked_dir.join("new2.txt"), "2").unwrap();
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.num_untracked, 3);
+    }
+
+    #[test]
+    fn test_git_ahead_behind_diverged_and_separate_push_remote() {
+        let origin_dir = tempdir().unwrap();
+        let origin_root = origin_dir.path();
+        run_git(&["init", "--bare", "--initial-branch=main"], origin_root);
+
+        let fork_dir = tempdir().unwrap();
+        let fork_root = fork_dir.path();
+        run_git(&["init", "--bare", "--initial-branch=main"], fork_root);
+
+        // Seed origin/main from a helper clone
+        let seed_dir = tempdir().unwrap();
+        let seed_root = seed_dir.path();
+        run_git(&["init", "--initial-branch=main"], seed_root);
+        run_git(&["config", "user.name", "Seed"], seed_root);
+        run_git(&["config", "user.email", "seed@example.com"], seed_root);
+        let origin_url = format!("file://{}", origin_root.display());
+        run_git(&["remote", "add", "origin", &origin_url], seed_root);
+
+        fs::write(seed_root.join("base.txt"), "base").unwrap();
+        run_git(&["add", "base.txt"], seed_root);
+        run_git(&["commit", "-m", "base"], seed_root);
+        run_git(&["push", "-u", "origin", "main"], seed_root);
+
+        // Set up local repo tracking origin/main from local branch `feature`
+        let local_dir = tempdir().unwrap();
+        let local_root = local_dir.path();
+        run_git(&["init", "--initial-branch=feature"], local_root);
+        run_git(&["config", "user.name", "Local"], local_root);
+        run_git(&["config", "user.email", "local@example.com"], local_root);
+        run_git(&["remote", "add", "origin", &origin_url], local_root);
+        let fork_url = format!("file://{}", fork_root.display());
+        run_git(&["remote", "add", "fork", &fork_url], local_root);
+
+        run_git(&["fetch", "origin"], local_root);
+        run_git(&["reset", "--hard", "origin/main"], local_root);
+        run_git(
+            &["branch", "--set-upstream-to=origin/main", "feature"],
+            local_root,
+        );
+        run_git(&["config", "branch.feature.pushRemote", "fork"], local_root);
+
+        // Push current state to fork/feature, then add 1 extra commit on fork/feature via seed repo
+        run_git(&["push", "fork", "feature:feature"], local_root);
+        run_git(&["remote", "add", "fork", &fork_url], seed_root);
+        run_git(&["fetch", "fork"], seed_root);
+        run_git(&["checkout", "-b", "fork-work", "fork/feature"], seed_root);
+        fs::write(seed_root.join("fork_only.txt"), "fork1").unwrap();
+        run_git(&["add", "fork_only.txt"], seed_root);
+        run_git(&["commit", "-m", "fork commit 1"], seed_root);
+        run_git(&["push", "fork", "fork-work:feature"], seed_root);
+
+        // Advance origin/main by 2 commits via seed repo
+        run_git(&["checkout", "main"], seed_root);
+        fs::write(seed_root.join("origin1.txt"), "o1").unwrap();
+        run_git(&["add", "origin1.txt"], seed_root);
+        run_git(&["commit", "-m", "origin 1"], seed_root);
+        fs::write(seed_root.join("origin2.txt"), "o2").unwrap();
+        run_git(&["add", "origin2.txt"], seed_root);
+        run_git(&["commit", "-m", "origin 2"], seed_root);
+        run_git(&["push", "origin", "main"], seed_root);
+
+        // Fetch both remotes in local_root and make 3 local commits on feature
+        run_git(&["fetch", "--all"], local_root);
+        for i in 1..=3 {
+            fs::write(local_root.join(format!("local{i}.txt")), format!("{i}")).unwrap();
+            run_git(&["add", &format!("local{i}.txt")], local_root);
+            run_git(&["commit", "-m", &format!("local {i}")], local_root);
+        }
+
+        let (_, state) = get_git_state(local_root).unwrap().unwrap();
+        assert_eq!(state.local_branch, "feature");
+        assert_eq!(state.remote_name, "origin");
+        assert_eq!(state.remote_branch, "main");
+        assert_eq!(state.remote_url, origin_url);
+        assert_eq!(state.commits_ahead, 3);
+        assert_eq!(state.commits_behind, 2);
+        assert_eq!(state.push_remote_name, "fork");
+        assert_eq!(state.push_remote_url, fork_url);
+        assert_eq!(state.push_commits_ahead, 3);
+        assert_eq!(state.push_commits_behind, 1);
+    }
+
+    #[test]
+    fn test_git_rebase_apply_action() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init", "--initial-branch=main"], root);
+        let rebase_apply = root.join(".git").join("rebase-apply");
+        fs::create_dir(&rebase_apply).unwrap();
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.action, "rebase");
+    }
+
+    #[test]
+    fn test_git_packed_objects_and_refs() {
+        let remote_dir = tempdir().unwrap();
+        run_git(
+            &["init", "--bare", "--initial-branch=main"],
+            remote_dir.path(),
+        );
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init", "--initial-branch=main"], root);
+        run_git(&["config", "user.name", "Test User"], root);
+        run_git(&["config", "user.email", "test@example.com"], root);
+
+        let remote_url = format!("file://{}", remote_dir.path().display());
+        run_git(&["remote", "add", "origin", &remote_url], root);
+
+        fs::write(root.join("file.txt"), "v1").unwrap();
+        run_git(&["add", "file.txt"], root);
+        run_git(&["commit", "-m", "commit 1"], root);
+        run_git(&["push", "-u", "origin", "main"], root);
+
+        fs::write(root.join("file.txt"), "v2").unwrap();
+        run_git(&["commit", "-am", "Packed commit summary"], root);
+        run_git(&["tag", "-a", "v2.0", "-m", "Release 2.0"], root);
+
+        // Pack all objects and refs
+        run_git(&["gc", "--prune=now"], root);
+        run_git(&["pack-refs", "--all"], root);
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.local_branch, "main");
+        assert_eq!(state.remote_name, "origin");
+        assert_eq!(state.remote_branch, "main");
+        assert_eq!(state.commits_ahead, 1);
+        assert_eq!(state.commits_behind, 0);
+        assert_eq!(state.tag, "v2.0");
+        assert_eq!(state.commit_summary, "Packed commit summary");
+        assert_eq!(state.index_size, 1);
+    }
+
+    #[test]
+    fn test_git_linked_worktree() {
+        let dir = tempdir().unwrap();
+        let main_root = dir.path().join("main-repo");
+        let wt_root = dir.path().join("linked-wt");
+        fs::create_dir_all(&main_root).unwrap();
+
+        run_git(&["init", "--initial-branch=main"], &main_root);
+        run_git(&["config", "user.name", "Test User"], &main_root);
+        run_git(&["config", "user.email", "test@example.com"], &main_root);
+
+        fs::write(main_root.join("shared.txt"), "hello").unwrap();
+        run_git(&["add", "shared.txt"], &main_root);
+        run_git(&["commit", "-m", "Main commit"], &main_root);
+
+        run_git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "wt-branch",
+                wt_root.to_str().unwrap(),
+                "main",
+            ],
+            &main_root,
+        );
+
+        fs::write(wt_root.join("untracked.txt"), "new").unwrap();
+
+        let (discovered_root, state) = get_git_state(&wt_root).unwrap().unwrap();
+        assert_eq!(
+            discovered_root.canonicalize().unwrap(),
+            wt_root.canonicalize().unwrap()
+        );
+        assert_eq!(state.local_branch, "wt-branch");
+        assert_eq!(state.commit_summary, "Main commit");
+        assert_eq!(state.index_size, 1);
+        assert_eq!(state.num_untracked, 1);
+    }
+
+    #[test]
+    fn test_git_status_typechange() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init", "--initial-branch=main"], root);
+        run_git(&["config", "user.name", "Test User"], root);
+        run_git(&["config", "user.email", "test@example.com"], root);
+
+        fs::write(root.join("target.txt"), "target").unwrap();
+        fs::write(root.join("link_or_file.txt"), "regular file").unwrap();
+        run_git(&["add", "target.txt", "link_or_file.txt"], root);
+        run_git(&["commit", "-m", "initial"], root);
+
+        // Replace regular file with a symlink (unstaged typechange)
+        fs::remove_file(root.join("link_or_file.txt")).unwrap();
+        symlink("target.txt", root.join("link_or_file.txt")).unwrap();
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.num_unstaged, 1);
+        assert_eq!(state.num_unstaged_deleted, 0);
+        assert_eq!(state.num_staged, 0);
+
+        // Stage the typechange
+        run_git(&["add", "link_or_file.txt"], root);
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.num_staged, 1);
+        assert_eq!(state.num_staged_new, 0);
+        assert_eq!(state.num_staged_deleted, 0);
+        assert_eq!(state.num_unstaged, 0);
     }
 }
