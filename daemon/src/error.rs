@@ -20,7 +20,6 @@ pub enum ShbotError {
     Io(std::io::Error),
     Notify(notify::Error),
     TomlSerDe(toml::de::Error),
-    Git2(git2::Error),
     EnvVar(std::env::VarError),
     TracingSub(tracing::subscriber::SetGlobalDefaultError),
     Custom(String),
@@ -34,7 +33,6 @@ impl fmt::Display for ShbotError {
             ShbotError::Io(e) => write!(f, "IO Error: {}", e),
             ShbotError::Notify(e) => write!(f, "Watcher Error: {}", e),
             ShbotError::TomlSerDe(e) => write!(f, "TOML parse error: {}", e),
-            ShbotError::Git2(e) => write!(f, "Git error: {}", e),
             ShbotError::EnvVar(e) => write!(f, "Environment variable error: {}", e),
             ShbotError::TracingSub(e) => write!(f, "Tracing error: {}", e),
             ShbotError::Custom(m) => write!(f, "{}", m),
@@ -59,12 +57,6 @@ impl From<notify::Error> for ShbotError {
 impl From<toml::de::Error> for ShbotError {
     fn from(err: toml::de::Error) -> Self {
         ShbotError::TomlSerDe(err)
-    }
-}
-
-impl From<git2::Error> for ShbotError {
-    fn from(err: git2::Error) -> Self {
-        ShbotError::Git2(err)
     }
 }
 
@@ -108,10 +100,6 @@ mod tests {
         let err4 = ShbotError::TomlSerDe(toml_err);
         assert!(err4.to_string().starts_with("TOML parse error:"));
 
-        let git_err = git2::Error::from_str("git error");
-        let err5 = ShbotError::Git2(git_err);
-        assert_eq!(err5.to_string(), "Git error: git error");
-
         // We can't easily construct a TracingSub error, so we skip it or mock it if possible
     }
 
@@ -124,10 +112,6 @@ mod tests {
         let env_err = std::env::VarError::NotPresent;
         let err2: ShbotError = env_err.into();
         assert!(matches!(err2, ShbotError::EnvVar(_)));
-
-        let git_err = git2::Error::from_str("git error");
-        let err3: ShbotError = git_err.into();
-        assert!(matches!(err3, ShbotError::Git2(_)));
 
         let notify_err = notify::Error::generic("notify error");
         let err4: ShbotError = notify_err.into();

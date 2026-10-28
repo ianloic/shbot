@@ -55,9 +55,10 @@ and broadcasting state updates back to specific shells.
   `daemon.command_timeout_sec`, and captured output is capped at 64 KiB. It
   securely pushes executed outputs to matching clients over the socket via
   `broadcast_to_cwd`.
-- **`git.rs`:** Inspects the current state of a Git repository quickly,
-  determining dirty states or pending commits dynamically when a client
-  navigates into an active tree or when the `watcher` detects modifications.
+- **`git.rs`:** Inspects the current state of a Git repository quickly using the
+  pure-Rust `gix` (`gitoxide`) library, determining dirty states or pending
+  commits dynamically when a client navigates into an active tree or when the
+  `watcher` detects modifications.
 
 ## 2. Bootstrapping and Daemon Start-Up Process
 

@@ -154,10 +154,10 @@ echo $SHBOT_STATE[my_background_task]
 
 ### Accessing Git Status (`$SHBOT_STATE[git]`)
 
-`shbot` features an extraordinarily deep, native, high-performance integration
-with `git2`. Whenever you enter a Git repository or whenever a file changes, the
-daemon computes a rich 27-field dataset mapping seamlessly to the standard
-expected by `gitstatusd`.
+`shbot` features an extraordinarily deep, native, high-performance pure-Rust
+integration with `gix` (`gitoxide`). Whenever you enter a Git repository or
+whenever a file changes, the daemon computes a rich 27-field dataset mapping
+seamlessly to the standard expected by `gitstatusd`.
 
 To safely avoid whitespace collision in parsed values like commit messages, the
 serialized Git string uses the ASCII Unit Separator (`\x1f`).

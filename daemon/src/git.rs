@@ -14,8 +14,23 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::error::Result;
-use git2::{Repository, StatusOptions};
+use gix::bstr::{BString, ByteSlice};
+use gix::commit::describe::SelectRef;
+use gix::diff::index::Change as TreeIndexChange;
+use gix::dir::entry::Status as DirEntryStatus;
+use gix::head::Kind as HeadKind;
+use gix::index::entry::Stage;
+use gix::progress::Discard;
+use gix::refs::FullName;
+use gix::remote::Direction;
+use gix::status::index_worktree::Item as IndexWorktreeItem;
+use gix::status::plumbing::index_as_worktree::{Change as WorktreeChange, EntryStatus};
+use gix::status::tree_index::TrackRenames;
+use gix::status::{Item as StatusItem, Submodule, UntrackedFiles};
+use gix::{ObjectId, Repository};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use tracing::{debug, info};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct GitState {
@@ -83,10 +98,35 @@ impl GitState {
     }
 }
 
+fn ahead_behind(
+    repo: &Repository,
+    local_id: ObjectId,
+    upstream_id: ObjectId,
+) -> Option<(usize, usize)> {
+    if local_id == upstream_id {
+        return Some((0, 0));
+    }
+    let ahead = repo
+        .rev_walk([local_id])
+        .with_hidden([upstream_id])
+        .all()
+        .ok()?
+        .flatten()
+        .count();
+    let behind = repo
+        .rev_walk([upstream_id])
+        .with_hidden([local_id])
+        .all()
+        .ok()?
+        .flatten()
+        .count();
+    Some((ahead, behind))
+}
+
 pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
-    tracing::debug!("Evaluating git state for path: {:?}", path);
+    debug!("Evaluating git state for path: {:?}", path);
     // Discover repository. It traverses upwards automatically.
-    let mut repo = match Repository::discover(path) {
+    let repo = match gix::discover(path) {
         Ok(r) => r,
         Err(_) => return Ok(None),
     };
@@ -100,13 +140,19 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
     let mut state = GitState::default();
     state.workdir = root.to_string_lossy().into_owned();
 
-    // Determine branch name
-    if let Ok(head) = repo.head() {
-        if let Some(name) = head.shorthand() {
-            state.local_branch = name.to_string();
+    let mut head_ref_name: Option<FullName> = None;
+    let mut head_commit_id: Option<ObjectId> = None;
+
+    // Determine branch name and HEAD commit metadata
+    if let Ok(mut head) = repo.head() {
+        if let HeadKind::Symbolic(r) = &head.kind {
+            head_ref_name = Some(r.name.clone());
+            state.local_branch = r.name.shorten().to_str_lossy().into_owned();
         }
 
-        if let Some(target) = head.target() {
+        if let Ok(commit) = head.peel_to_commit() {
+            let target = commit.id;
+            head_commit_id = Some(target);
             let mut oid_str = target.to_string();
             state.commit = oid_str.clone();
 
@@ -115,70 +161,74 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
                 state.local_branch = oid_str;
             }
 
-            // Tag
-            if let Ok(describe) = repo.describe(
-                git2::DescribeOptions::new()
-                    .describe_tags()
-                    .max_candidates_tags(0),
-            ) && let Ok(format) = describe.format(None)
+            // Tag (exact match on HEAD)
+            if let Ok(Some(resolution)) = commit
+                .describe()
+                .names(SelectRef::AllTags)
+                .max_candidates(0)
+                .try_resolve()
+                && resolution.outcome.depth == 0
+                && let Some(name) = resolution.outcome.name
             {
-                state.tag = format;
+                state.tag = name.to_str_lossy().into_owned();
             }
 
             // Commit encoding & summary
-            if let Ok(commit) = repo.find_commit(target) {
-                if let Some(enc) = commit.message_encoding() {
-                    state.commit_encoding = enc.to_string();
+            if let Ok(commit_ref) = commit.decode() {
+                if let Some(enc) = commit_ref.encoding {
+                    state.commit_encoding = enc.to_str_lossy().into_owned();
                 } else {
                     state.commit_encoding = "UTF-8".to_string();
                 }
-                if let Some(summary) = commit.summary() {
-                    state.commit_summary = summary.to_string();
+                if let Some(first_line) = commit_ref.message.lines().next() {
+                    state.commit_summary = first_line.to_str_lossy().into_owned();
                 }
             }
-        }
-
-        // Calculate ahead/behind if there is an upstream
-        if let Some(name) = head.name()
-            && let Ok(local) = repo.branch_upstream_name(name)
-            && let Some(local_str) = local.as_str()
-        {
-            if let Ok(upstream_obj) = repo.revparse_single(local_str)
-                && let Ok(upstream_commit) = upstream_obj.peel_to_commit()
-            {
-                let local_oid = head.target().unwrap();
-                let upstream_oid = upstream_commit.id();
-                if let Ok((ahead, behind)) = repo.graph_ahead_behind(local_oid, upstream_oid) {
-                    state.commits_ahead = ahead;
-                    state.commits_behind = behind;
-                }
-            }
-
-            if let Ok(buf) = repo.branch_upstream_remote(name)
-                && let Some(remote_name) = buf.as_str()
-            {
-                state.remote_name = remote_name.to_string();
-
-                if let Ok(remote) = repo.find_remote(remote_name)
-                    && let Some(url) = remote.url()
-                {
-                    state.remote_url = url.to_string();
-                }
-
-                let prefix = format!("refs/remotes/{}/", remote_name);
-                if local_str.starts_with(&prefix) {
-                    state.remote_branch = local_str[prefix.len()..].to_string();
-                } else {
-                    state.remote_branch = local_str.to_string();
-                }
-            }
+        } else {
+            state.local_branch = "main".to_string();
         }
     } else {
         state.local_branch = "main".to_string(); // Initial repo, no commits
     }
 
+    // Calculate ahead/behind if there is an upstream
+    if let Some(ref full_name) = head_ref_name
+        && let Some(local_oid) = head_commit_id
+        && let Some(Ok(tracking_ref_name)) =
+            repo.branch_remote_tracking_ref_name(full_name.as_ref(), Direction::Fetch)
+    {
+        let local_str = tracking_ref_name.as_bstr().to_str_lossy().into_owned();
+
+        if let Ok(mut upstream_ref) = repo.find_reference(local_str.as_str())
+            && let Ok(upstream_commit) = upstream_ref.peel_to_commit()
+            && let Some((ahead, behind)) = ahead_behind(&repo, local_oid, upstream_commit.id)
+        {
+            state.commits_ahead = ahead;
+            state.commits_behind = behind;
+        }
+
+        let short_branch = full_name.shorten();
+        if let Some(remote_name_cow) = repo.branch_remote_name(short_branch, Direction::Fetch) {
+            let remote_name = remote_name_cow.as_bstr().to_str_lossy().into_owned();
+            state.remote_name = remote_name.clone();
+
+            if let Ok(remote) = repo.find_remote(remote_name.as_str())
+                && let Some(url) = remote.url(Direction::Fetch)
+            {
+                state.remote_url = url.to_bstring().to_str_lossy().into_owned();
+            }
+
+            let prefix = format!("refs/remotes/{}/", remote_name);
+            if local_str.starts_with(&prefix) {
+                state.remote_branch = local_str[prefix.len()..].to_string();
+            } else {
+                state.remote_branch = local_str;
+            }
+        }
+    }
+
     // Determine Action
-    let git_dir = repo.path();
+    let git_dir = repo.git_dir();
     if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
         state.action = "rebase".to_string();
     } else if git_dir.join("MERGE_HEAD").exists() {
@@ -191,111 +241,135 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
         state.action = "bisect".to_string();
     }
 
+    // Index size & conflicted entries
+    let mut conflicted_paths: HashSet<BString> = HashSet::new();
+    if let Ok(index) = repo.open_index() {
+        state.index_size = index.entries().len();
+        for entry in index.entries() {
+            if entry.flags.stage() != Stage::Unconflicted {
+                conflicted_paths.insert(entry.path(&index).to_owned());
+            }
+        }
+    }
+    state.num_conflicted = conflicted_paths.len();
+
     // Determine statuses
-    let mut opts = StatusOptions::new();
-    opts.include_untracked(true)
-        .recurse_untracked_dirs(false)
-        .renames_head_to_index(true)
-        .include_ignored(false)
-        .update_index(false);
+    let workdir = repo.workdir().unwrap_or(repo.git_dir());
+    info!("Starting gix status crawl for {:?}", workdir);
 
-    let workdir = repo.workdir().unwrap_or(repo.path());
-    tracing::info!("Starting libgit2 crawl for {:?}", workdir);
+    if let Ok(platform) = repo.status(Discard) {
+        let platform = platform
+            .untracked_files(UntrackedFiles::Collapsed)
+            .index_worktree_submodules(Submodule::AsConfigured { check_dirty: true })
+            .tree_index_track_renames(TrackRenames::Given(Default::default()));
 
-    if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
-        for entry in statuses.iter() {
-            let s = entry.status();
-
-            if s.is_conflicted() {
-                state.num_conflicted += 1;
-                continue;
-            }
-
-            if s.intersects(
-                git2::Status::INDEX_NEW
-                    | git2::Status::INDEX_MODIFIED
-                    | git2::Status::INDEX_DELETED
-                    | git2::Status::INDEX_RENAMED
-                    | git2::Status::INDEX_TYPECHANGE,
-            ) {
-                state.num_staged += 1;
-                if s.intersects(git2::Status::INDEX_NEW) {
-                    state.num_staged_new += 1;
+        if let Ok(iter) = platform.into_iter(Vec::<BString>::new()) {
+            for item in iter.flatten() {
+                match item {
+                    StatusItem::TreeIndex(change) => {
+                        if conflicted_paths.contains(change.location()) {
+                            continue;
+                        }
+                        match change {
+                            TreeIndexChange::Addition { .. } => {
+                                state.num_staged += 1;
+                                state.num_staged_new += 1;
+                            }
+                            TreeIndexChange::Deletion { .. } => {
+                                state.num_staged += 1;
+                                state.num_staged_deleted += 1;
+                            }
+                            TreeIndexChange::Modification { .. }
+                            | TreeIndexChange::Rewrite { .. } => {
+                                state.num_staged += 1;
+                            }
+                        }
+                    }
+                    StatusItem::IndexWorktree(wt_item) => match wt_item {
+                        IndexWorktreeItem::Modification {
+                            rela_path, status, ..
+                        } => {
+                            if conflicted_paths.contains(&rela_path) {
+                                continue;
+                            }
+                            match status {
+                                EntryStatus::Change(WorktreeChange::Removed) => {
+                                    state.num_unstaged += 1;
+                                    state.num_unstaged_deleted += 1;
+                                }
+                                EntryStatus::Change(
+                                    WorktreeChange::Type { .. }
+                                    | WorktreeChange::Modification { .. }
+                                    | WorktreeChange::SubmoduleModification(_),
+                                ) => {
+                                    state.num_unstaged += 1;
+                                }
+                                EntryStatus::Conflict { .. }
+                                | EntryStatus::NeedsUpdate(_)
+                                | EntryStatus::IntentToAdd => {}
+                            }
+                        }
+                        IndexWorktreeItem::DirectoryContents { entry, .. } => {
+                            if conflicted_paths.contains(&entry.rela_path) {
+                                continue;
+                            }
+                            if matches!(entry.status, DirEntryStatus::Untracked) {
+                                state.num_untracked += 1;
+                            }
+                        }
+                        IndexWorktreeItem::Rewrite { dirwalk_entry, .. } => {
+                            if !conflicted_paths.contains(&dirwalk_entry.rela_path) {
+                                state.num_unstaged += 1;
+                            }
+                        }
+                    },
                 }
-                if s.intersects(git2::Status::INDEX_DELETED) {
-                    state.num_staged_deleted += 1;
-                }
-            }
-
-            if s.intersects(
-                git2::Status::WT_MODIFIED
-                    | git2::Status::WT_DELETED
-                    | git2::Status::WT_TYPECHANGE
-                    | git2::Status::WT_RENAMED,
-            ) {
-                state.num_unstaged += 1;
-                if s.intersects(git2::Status::WT_DELETED) {
-                    state.num_unstaged_deleted += 1;
-                }
-            }
-
-            if s.intersects(git2::Status::WT_NEW) {
-                state.num_untracked += 1;
             }
         }
     }
 
-    tracing::info!("Finished libgit2 crawl for {:?}", workdir);
+    info!("Finished gix status crawl for {:?}", workdir);
 
     // Stashes
-    let mut stashes = 0;
-    let _ = repo.stash_foreach(|_, _, _| {
-        stashes += 1;
-        true
-    });
-    state.stashes = stashes;
-
-    // Index size
-    if let Ok(index) = repo.index() {
-        state.index_size = index.len();
-        // Skip-worktree and assume-unchanged counts left at 0 as they require flag checking
+    if let Ok(stash_ref) = repo.find_reference("refs/stash")
+        && let Ok(Some(log_iter)) = stash_ref.log_iter().rev()
+    {
+        state.stashes = log_iter.flatten().count();
     }
 
     // Push remote
-    if let Ok(head) = repo.head()
-        && let Some(name) = head.name()
-    {
-        let branch_name = name.trim_start_matches("refs/heads/");
-        let mut push_remote = None;
-
-        if let Ok(cfg) = repo.config() {
-            let push_remote_key = format!("branch.{}.pushRemote", branch_name);
-            if let Ok(pr) = cfg.get_string(&push_remote_key) {
-                push_remote = Some(pr);
-            } else if let Ok(pr) = cfg.get_string("remote.pushDefault") {
-                push_remote = Some(pr);
-            } else if let Ok(buf) = repo.branch_upstream_remote(name)
-                && let Some(r) = buf.as_str()
-            {
-                push_remote = Some(r.to_string());
-            }
-        }
+    if let Some(ref full_name) = head_ref_name {
+        let branch_name = full_name.shorten().to_str_lossy().into_owned();
+        let cfg = repo.config_snapshot();
+        let push_remote_key = format!("branch.{}.pushRemote", branch_name);
+        let push_remote = cfg
+            .string(&push_remote_key)
+            .map(|s| s.to_str_lossy().into_owned())
+            .or_else(|| {
+                cfg.string("remote.pushDefault")
+                    .map(|s| s.to_str_lossy().into_owned())
+            })
+            .or_else(|| {
+                repo.branch_remote_name(branch_name.as_str(), Direction::Fetch)
+                    .map(|r| r.as_bstr().to_str_lossy().into_owned())
+            });
 
         if let Some(r) = push_remote {
             state.push_remote_name = r.clone();
-            if let Ok(remote) = repo.find_remote(&r)
-                && let Some(url) = remote.url()
+            if let Ok(remote) = repo.find_remote(r.as_str())
+                && let Some(url) = remote
+                    .url(Direction::Push)
+                    .or_else(|| remote.url(Direction::Fetch))
             {
-                state.push_remote_url = url.to_string();
+                state.push_remote_url = url.to_bstring().to_str_lossy().into_owned();
             }
 
             // push commits ahead/behind
             let push_ref = format!("refs/remotes/{}/{}", r, branch_name);
-            if let Ok(upstream_obj) = repo.revparse_single(&push_ref)
-                && let Ok(upstream_commit) = upstream_obj.peel_to_commit()
-                && let Some(local_oid) = head.target()
-                && let Ok((ahead, behind)) =
-                    repo.graph_ahead_behind(local_oid, upstream_commit.id())
+            if let Some(local_oid) = head_commit_id
+                && let Ok(mut upstream_ref) = repo.find_reference(&push_ref)
+                && let Ok(upstream_commit) = upstream_ref.peel_to_commit()
+                && let Some((ahead, behind)) = ahead_behind(&repo, local_oid, upstream_commit.id)
             {
                 state.push_commits_ahead = ahead;
                 state.push_commits_behind = behind;
