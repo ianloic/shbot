@@ -75,16 +75,28 @@ using `systemd` socket activation or a built-in self-spawn fallback mechanism:
    command to immediately test the socket file
    (`~/.local/state/shbot/<HOST>.socket`). If the socket responds, connection
    completes instantly.
-3. **Foreground Launcher (`shbot connect`):** If no daemon is listening (and
-   systemd is unavailable), the shell synchronously runs `shbot connect`.
-4. **Stale Socket Cleanup:** The launcher probes the existing socket file; a
+3. **Binary Resolution & Lazy Download (`_shbot_resolve_bin`):** If no daemon is
+   listening (and systemd is unavailable), the Zsh plugin locates the `shbot`
+   executable in priority order:
+   - `$SHBOT_BIN` (explicit environment override)
+   - `${XDG_STATE_HOME:-$HOME/.local/state}/shbot/dev-bin` (local development
+     symlink managed by `mise run dev-link` / `mise run dev-unlink`)
+   - `${XDG_CACHE_HOME:-$HOME/.cache}/shbot/v<SHBOT_VERSION>/shbot-<os>-<arch>`
+     (cached release binary)
+   - If the cached release binary is missing, the plugin downloads the matching
+     prebuilt tarball and `sha256sums.txt` from GitHub Releases, verifies the
+     SHA-256 digest, and atomically extracts the binary into the cache directory
+     (`0700`).
+4. **Foreground Launcher (`shbot connect`):** Once resolved, the shell
+   synchronously runs `<shbot_bin> connect`.
+5. **Stale Socket Cleanup:** The launcher probes the existing socket file; a
    stale leftover from a crashed daemon is unlinked, while a live socket ends
    the bootstrap immediately. The daemon itself repeats this liveness check and
    refuses to bind over a socket owned by another live daemon.
-5. **Self-Spawn:** The launcher spawns `<current_exe> daemon` (fork + exec) with
+6. **Self-Spawn:** The launcher spawns `<current_exe> daemon` (fork + exec) with
    stdio redirected to the per-host log file. The daemon process creates the
    state directory (`0700`) and binds the socket (`0600`) itself.
-6. **Startup Verification:** The launcher polls briefly (bounded to ~500 ms)
+7. **Startup Verification:** The launcher polls briefly (bounded to ~500 ms)
    until the socket responds, then returns control to Zsh, which completes the
    `zsocket` connection with zero additional delay.
 

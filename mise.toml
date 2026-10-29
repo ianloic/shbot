@@ -60,3 +60,66 @@ echo ""
 echo "==> Coverage Summary:"
 cargo llvm-cov report
 """
+
+[tasks.dev-link]
+description = "Build local release binary and link ~/.local/state/shbot/dev-bin for local testing"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+echo "==> Building local shbot binary..."
+cargo build --release -p shbot
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/shbot"
+mkdir -p -m 0700 "$STATE_DIR"
+ln -sfn "{{cwd}}/target/release/shbot" "$STATE_DIR/dev-bin"
+echo "==> Linked $STATE_DIR/dev-bin -> {{cwd}}/target/release/shbot"
+
+if STATUS="$("{{cwd}}/target/release/shbot" status 2>/dev/null)"; then
+    DAEMON_PID="$(printf '%s\n' "$STATUS" | awk -F: '/Daemon PID:/ {gsub(/ /, "", $2); print $2}')"
+    if [[ -n "$DAEMON_PID" ]]; then
+        echo "==> Stopping running daemon (PID $DAEMON_PID) so shells reconnect to local build..."
+        kill -TERM "$DAEMON_PID" 2>/dev/null || true
+    fi
+fi
+"""
+
+[tasks.dev-unlink]
+description = "Remove ~/.local/state/shbot/dev-bin override and revert to prebuilt release binary"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/shbot"
+if [[ -x "$STATE_DIR/dev-bin" ]]; then
+    if STATUS="$("$STATE_DIR/dev-bin" status 2>/dev/null)"; then
+        DAEMON_PID="$(printf '%s\n' "$STATUS" | awk -F: '/Daemon PID:/ {gsub(/ /, "", $2); print $2}')"
+        if [[ -n "$DAEMON_PID" ]]; then
+            echo "==> Stopping running daemon (PID $DAEMON_PID)..."
+            kill -TERM "$DAEMON_PID" 2>/dev/null || true
+        fi
+    fi
+fi
+rm -f "$STATE_DIR/dev-bin"
+echo "==> Removed $STATE_DIR/dev-bin override"
+"""
+
+[tasks.release]
+description = "Bump version in Cargo.toml and shbot.plugin.zsh, format, commit, and tag v<version>"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+VERSION="${1:-}"
+if [[ ! "$VERSION" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then
+    echo "Usage: mise run release <X.Y.Z>" >&2
+    exit 1
+fi
+sed -i -E "0,/^version = \".*\"/s//version = \"${VERSION}\"/" daemon/Cargo.toml
+sed -i -E "s/^typeset -g SHBOT_VERSION=\".*\"/typeset -g SHBOT_VERSION=\"${VERSION}\"/" zsh/shbot.plugin.zsh
+cargo check -p shbot
+mise run fmt
+if ! git diff --quiet daemon/Cargo.toml Cargo.lock zsh/shbot.plugin.zsh; then
+    git add daemon/Cargo.toml Cargo.lock zsh/shbot.plugin.zsh
+    git commit -m "chore: release v${VERSION}"
+fi
+git tag -a "v${VERSION}" -m "Release v${VERSION}"
+echo "==> Created tag v${VERSION}. Run 'git push origin main v${VERSION}' to publish."
+"""

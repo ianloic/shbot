@@ -12,37 +12,39 @@ up-to-date state.
 
 ### 1. Installation
 
-The easiest way to install `shbot` and its systemd user services is to use the
-included installation script:
+#### Option A: Zero-Build Zsh Plugin (Prebuilt Releases)
+
+You can include `shbot` directly in your dotfiles (for example as a Git
+submodule or via a Zsh plugin manager) and source `zsh/shbot.plugin.zsh` in your
+`~/.zshrc`:
+
+```zsh
+source /path/to/shbot/zsh/shbot.plugin.zsh
+```
+
+When a new shell starts and no daemon is listening yet, the plugin automatically
+downloads the matching prebuilt `shbot` release binary for your platform
+(`linux-x86_64` or `linux-aarch64`) from GitHub Releases, verifies its SHA-256
+checksum against `sha256sums.txt`, caches it in `~/.cache/shbot/v<version>/`,
+and starts the background daemon. It also provides a `shbot` shell function
+wrapping the cached binary so CLI subcommands (`shbot status`, `shbot reload`,
+`shbot loglevel`) work without a local Rust toolchain.
+
+#### Option B: Building from Source with `systemd`
+
+To compile `shbot` locally and install its `systemd` user socket activation
+units, run the included installation script:
 
 ```bash
-git clone https://github.com/yourusername/shbot.git
+git clone https://github.com/ianloic/shbot.git
 cd shbot
 ./install.sh
 ```
 
-This script will seamlessly compile the daemon using
-`cargo install --path daemon`, copy the binary to `~/.cargo/bin/`, set up
-`systemd` socket activation, and configure your `~/.zshrc`.
+This script compiles the daemon using `cargo install --path daemon`, sets up
+`systemd` socket activation, and configures your `~/.zshrc`.
 
-> **Important:** Ensure that `~/.cargo/bin` is in your system's `$PATH` so the
-> shell can discover the `shbot` command.
-
-### 2. Shell Setup
-
-If you used `./install.sh`, this is already done for you! Otherwise, add the
-bundled Zsh plugin to your `~/.zshrc`:
-
-```zsh
-# Source the shbot plugin
-source /path/to/shbot/zsh/shbot.plugin.zsh
-```
-
-Upon launching a new shell, `shbot` will automatically start the background
-daemon (if it isn't socket-activated via systemd already) and instantly connect
-your shell.
-
-### 3. Minimal Configuration (Optional)
+### 2. Minimal Configuration (Optional)
 
 `shbot` natively comes with zero-configuration Git status reporting. If you want
 to configure background state updates or file-watchers, create the configuration
@@ -272,6 +274,12 @@ toolchains (Rust, `shfmt`, `dprint`) and tasks. To get started:
 2. Run `mise install` to download the required tools.
 3. Run `mise run fmt` to format the codebase.
 4. Run `mise run coverage` to generate a test coverage report.
+5. Run `mise run dev-link` to build the daemon locally and point
+   `~/.local/state/shbot/dev-bin` at your local build (and `mise run dev-unlink`
+   to switch back to the prebuilt release binary). You can also override the
+   binary path explicitly via `$SHBOT_BIN`.
+6. Run `mise run release <X.Y.Z>` to bump the version across `daemon/Cargo.toml`
+   and `zsh/shbot.plugin.zsh` and create a release tag.
 
 ---
 

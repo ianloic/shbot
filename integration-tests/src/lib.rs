@@ -105,10 +105,7 @@ mod tests {
         let dummy_sock = env.home_dir.path().join("dummy.sock");
         let listener = UnixListener::bind(&dummy_sock)?;
 
-        env.send_line(&format!(
-            "export SHBOT_SOCKET={}",
-            dummy_sock.display()
-        ))?;
+        env.send_line(&format!("export SHBOT_SOCKET={}", dummy_sock.display()))?;
         env.source_plugin()?;
 
         listener.set_nonblocking(true)?;
@@ -133,9 +130,7 @@ mod tests {
         // loop also drains stale PTY output left by zle reset-prompt redraws.
         env.wait_for_mut(5, |env| {
             let out = env.send_line("print -r -- \"INJ=${SHBOT_STATE[inj]}\"")?;
-            Ok::<bool, Box<dyn std::error::Error>>(
-                out.contains("x\n") || out.contains("x\r\n"),
-            )
+            Ok::<bool, Box<dyn std::error::Error>>(out.contains("x\n") || out.contains("x\r\n"))
         })?;
         env.wait_for_mut(5, |env| {
             let out = env.send_line("print -r -- \"INJ=${SHBOT_STATE[inj]}\"")?;
@@ -165,10 +160,7 @@ mod tests {
         let listener = UnixListener::bind(&dummy_sock)?;
 
         env.send_line("export SHBOT_SET_VCS_STATUS=1")?;
-        env.send_line(&format!(
-            "export SHBOT_SOCKET={}",
-            dummy_sock.display()
-        ))?;
+        env.send_line(&format!("export SHBOT_SOCKET={}", dummy_sock.display()))?;
         env.source_plugin()?;
 
         listener.set_nonblocking(true)?;
@@ -188,8 +180,33 @@ mod tests {
         // 27 \x1f-separated gitstatus fields with escaped separators. Field 27
         // carries an escaped newline to prove decoding happens before parsing.
         let fields: Vec<&str> = vec![
-            "/tmp/repo", "abcdef123", "main", "", "", "", "", "0", "1", "0", "0", "0", "0", "0",
-            "0", "", "", "", "", "", "", "", "", "0", "0", "", "subject%0Abody",
+            "/tmp/repo",
+            "abcdef123",
+            "main",
+            "",
+            "",
+            "",
+            "",
+            "0",
+            "1",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "0",
+            "0",
+            "",
+            "subject%0Abody",
         ];
         assert_eq!(fields.len(), 27);
         let payload = fields.join("%1F");
@@ -226,10 +243,7 @@ mod tests {
         let dummy_sock = env.home_dir.path().join("dummy.sock");
         let listener = UnixListener::bind(&dummy_sock)?;
 
-        env.send_line(&format!(
-            "export SHBOT_SOCKET={}",
-            dummy_sock.display()
-        ))?;
+        env.send_line(&format!("export SHBOT_SOCKET={}", dummy_sock.display()))?;
         env.source_plugin()?;
 
         listener.set_nonblocking(true)?;
@@ -841,6 +855,119 @@ scope = "nearest(.git)"
             .arg("-TERM")
             .arg(pid.to_string())
             .status();
+        Ok(())
+    }
+
+    #[test]
+    fn test_binary_resolution_and_auto_download() -> Result<(), Box<dyn std::error::Error>> {
+        use std::fs;
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::process::Command;
+
+        let mut env = TestEnv::new()?;
+        let dummy_sock = env.home_dir.path().join("dummy.sock");
+        let _listener = UnixListener::bind(&dummy_sock)?;
+        env.send_line(&format!("export SHBOT_SOCKET={}", dummy_sock.display()))?;
+        env.send_line("export SHBOT_UNAME_S=Linux")?;
+        env.send_line("export SHBOT_UNAME_M=x86_64")?;
+        env.source_plugin()?;
+
+        // Prepare a fake release directory served via file://
+        let release_dir = env.home_dir.path().join("releases");
+        let build_dir = env.home_dir.path().join("build");
+        fs::create_dir_all(&release_dir)?;
+        fs::create_dir_all(&build_dir)?;
+
+        let fake_shbot = build_dir.join("shbot");
+        fs::write(&fake_shbot, "#!/bin/sh\necho \"downloaded:$*\"\n")?;
+        fs::set_permissions(&fake_shbot, fs::Permissions::from_mode(0o755))?;
+
+        let archive_name = "shbot-v0.1.0-linux-x86_64.tar.gz";
+        let archive_path = release_dir.join(archive_name);
+        let status = Command::new("tar")
+            .arg("-C")
+            .arg(&build_dir)
+            .arg("-czf")
+            .arg(&archive_path)
+            .arg("shbot")
+            .status()?;
+        assert!(status.success());
+
+        // 1. Tampered sha256sums.txt must fail download and leave cache empty
+        let sums_path = release_dir.join("sha256sums.txt");
+        fs::write(
+            &sums_path,
+            format!(
+                "0000000000000000000000000000000000000000000000000000000000000000  {}\n",
+                archive_name
+            ),
+        )?;
+        env.send_line(&format!(
+            "export SHBOT_RELEASE_BASE_URL=file://{}",
+            release_dir.display()
+        ))?;
+        env.send_line("_shbot_resolve_bin")?;
+        let bad_rc = env.send_line("print -r -- RC=$?")?;
+        assert!(
+            bad_rc.contains("RC=1"),
+            "Tampered checksum must fail, got: {}",
+            bad_rc
+        );
+
+        // 2. Valid sha256sums.txt downloads, extracts into cache, and runs via shbot() wrapper
+        let sha_out = Command::new("sha256sum").arg(&archive_path).output()?;
+        assert!(sha_out.status.success());
+        let sha_hex = String::from_utf8_lossy(&sha_out.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string();
+        fs::write(&sums_path, format!("{}  {}\n", sha_hex, archive_name))?;
+
+        let out = env.send_line("shbot status")?;
+        assert!(
+            out.contains("downloaded:status"),
+            "Expected downloaded binary to run, got: {}",
+            out
+        );
+
+        let cached_bin = env
+            .home_dir
+            .path()
+            .join(".cache/shbot/v0.1.0/shbot-linux-x86_64");
+        assert!(
+            cached_bin.exists(),
+            "Cached binary must exist after download"
+        );
+
+        // 3. Local dev-bin symlink takes precedence over cached release binary
+        let state_dir = env.home_dir.path().join(".local/state/shbot");
+        fs::create_dir_all(&state_dir)?;
+        let dev_target = env.home_dir.path().join("shbot-dev");
+        fs::write(&dev_target, "#!/bin/sh\necho \"dev-bin:$*\"\n")?;
+        fs::set_permissions(&dev_target, fs::Permissions::from_mode(0o755))?;
+        symlink(&dev_target, state_dir.join("dev-bin"))?;
+
+        let out = env.send_line("shbot reload")?;
+        assert!(
+            out.contains("dev-bin:reload"),
+            "Expected dev-bin to override cached binary, got: {}",
+            out
+        );
+
+        // 4. Explicit SHBOT_BIN takes highest precedence over dev-bin and cached binary
+        let explicit_bin = env.home_dir.path().join("shbot-explicit");
+        fs::write(&explicit_bin, "#!/bin/sh\necho \"explicit:$*\"\n")?;
+        fs::set_permissions(&explicit_bin, fs::Permissions::from_mode(0o755))?;
+        env.send_line(&format!("export SHBOT_BIN={}", explicit_bin.display()))?;
+
+        let out = env.send_line("shbot loglevel debug")?;
+        assert!(
+            out.contains("explicit:loglevel debug"),
+            "Expected SHBOT_BIN to override dev-bin, got: {}",
+            out
+        );
+
         Ok(())
     }
 }

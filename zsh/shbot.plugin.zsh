@@ -19,11 +19,150 @@ autoload -Uz add-zsh-hook
 
 typeset -g SHBOT_FD=0
 typeset -gA SHBOT_STATE
+typeset -g SHBOT_VERSION="0.1.0"
+typeset -g SHBOT_REPO="${SHBOT_REPO:-ianloic/shbot}"
 
 function _shbot_debug() {
 	if [[ -n "$SHBOT_DEBUG" ]]; then
 		print -u2 "[shbot-debug] $*"
 	fi
+}
+
+function _shbot_platform() {
+	local uname_s="${SHBOT_UNAME_S:-$(command uname -s 2>/dev/null)}"
+	local uname_m="${SHBOT_UNAME_M:-$(command uname -m 2>/dev/null)}"
+	uname_s="${uname_s:l}"
+	uname_m="${uname_m:l}"
+	if [[ "$uname_s" == "linux" && "$uname_m" == "arm64" ]]; then
+		uname_m="aarch64"
+	elif [[ "$uname_m" == "amd64" ]]; then
+		uname_m="x86_64"
+	fi
+	REPLY="${uname_s}-${uname_m}"
+}
+
+function _shbot_download_bin() {
+	local target_plat="$1"
+	local dest_bin="$2"
+	local cache_dir="${dest_bin:h}"
+	local archive="shbot-v${SHBOT_VERSION}-${target_plat}.tar.gz"
+	local base_url="${SHBOT_RELEASE_BASE_URL:-https://github.com/${SHBOT_REPO}/releases/download/v${SHBOT_VERSION}}"
+
+	command mkdir -p -m 0700 "$cache_dir" 2>/dev/null || return 1
+	local tmp_dir
+	tmp_dir="$(command mktemp -d "${cache_dir}/.tmp.XXXXXX" 2>/dev/null)" || return 1
+
+	_shbot_debug "Downloading ${base_url}/${archive}"
+	if command -v curl >/dev/null 2>&1; then
+		if ! command curl -fsSL "${base_url}/${archive}" -o "${tmp_dir}/${archive}" 2>/dev/null ||
+			! command curl -fsSL "${base_url}/sha256sums.txt" -o "${tmp_dir}/sha256sums.txt" 2>/dev/null; then
+			_shbot_debug "Failed to download release assets from ${base_url}"
+			command rm -rf "$tmp_dir"
+			return 1
+		fi
+	elif command -v wget >/dev/null 2>&1; then
+		if ! command wget -qO "${tmp_dir}/${archive}" "${base_url}/${archive}" 2>/dev/null ||
+			! command wget -qO "${tmp_dir}/sha256sums.txt" "${base_url}/sha256sums.txt" 2>/dev/null; then
+			_shbot_debug "Failed to download release assets from ${base_url}"
+			command rm -rf "$tmp_dir"
+			return 1
+		fi
+	else
+		_shbot_debug "Neither curl nor wget found"
+		command rm -rf "$tmp_dir"
+		return 1
+	fi
+
+	local expected_hash=""
+	local sum_line
+	while IFS= read -r sum_line; do
+		local h="${sum_line%% *}"
+		local f="${sum_line##* }"
+		f="${f#\*}"
+		if [[ "$f" == "$archive" && -n "$h" ]]; then
+			expected_hash="$h"
+			break
+		fi
+	done <"${tmp_dir}/sha256sums.txt"
+
+	local actual_hash=""
+	if command -v sha256sum >/dev/null 2>&1; then
+		actual_hash="$(command sha256sum "${tmp_dir}/${archive}" 2>/dev/null)"
+		actual_hash="${actual_hash%% *}"
+	elif command -v shasum >/dev/null 2>&1; then
+		actual_hash="$(command shasum -a 256 "${tmp_dir}/${archive}" 2>/dev/null)"
+		actual_hash="${actual_hash%% *}"
+	else
+		_shbot_debug "Neither sha256sum nor shasum found"
+		command rm -rf "$tmp_dir"
+		return 1
+	fi
+
+	if [[ -z "$expected_hash" || "${actual_hash:l}" != "${expected_hash:l}" ]]; then
+		_shbot_debug "SHA-256 mismatch for ${archive}: expected ${expected_hash}, got ${actual_hash}"
+		command rm -rf "$tmp_dir"
+		return 1
+	fi
+
+	if ! command tar -xzf "${tmp_dir}/${archive}" -C "$tmp_dir" shbot 2>/dev/null || [[ ! -f "${tmp_dir}/shbot" ]]; then
+		_shbot_debug "Failed to extract shbot from ${archive}"
+		command rm -rf "$tmp_dir"
+		return 1
+	fi
+
+	command chmod 0700 "${tmp_dir}/shbot"
+	if ! command mv -f "${tmp_dir}/shbot" "$dest_bin" 2>/dev/null; then
+		command rm -rf "$tmp_dir"
+		return 1
+	fi
+	command rm -rf "$tmp_dir"
+	return 0
+}
+
+function _shbot_resolve_bin() {
+	if [[ -n "$SHBOT_BIN" ]]; then
+		if [[ -x "$SHBOT_BIN" ]]; then
+			REPLY="$SHBOT_BIN"
+			return 0
+		elif command -v "$SHBOT_BIN" >/dev/null 2>&1; then
+			REPLY="$(command -v "$SHBOT_BIN")"
+			return 0
+		fi
+		_shbot_debug "Configured SHBOT_BIN is not executable: $SHBOT_BIN"
+		return 1
+	fi
+
+	local dev_bin="${XDG_STATE_HOME:-$HOME/.local/state}/shbot/dev-bin"
+	if [[ -x "$dev_bin" ]]; then
+		_shbot_debug "Using local dev binary: $dev_bin"
+		REPLY="$dev_bin"
+		return 0
+	fi
+
+	_shbot_platform
+	local target_plat="$REPLY"
+	local cache_root="${SHBOT_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/shbot}"
+	local cached_bin="${cache_root}/v${SHBOT_VERSION}/shbot-${target_plat}"
+
+	if [[ -x "$cached_bin" ]]; then
+		REPLY="$cached_bin"
+		return 0
+	fi
+
+	if _shbot_download_bin "$target_plat" "$cached_bin"; then
+		REPLY="$cached_bin"
+		return 0
+	fi
+
+	return 1
+}
+
+function shbot() {
+	if ! _shbot_resolve_bin; then
+		print -u2 "shbot: failed to locate or download shbot binary"
+		return 1
+	fi
+	command "$REPLY" "$@"
 }
 
 function _shbot_update_vcs_status() {
@@ -119,8 +258,12 @@ function _shbot_connect() {
 	# Optimistically try connecting
 	if ! zsocket "$socket_path" 2>/dev/null; then
 		_shbot_debug "Socket not responding, starting daemon..."
-		local shbot_cmd="${SHBOT_BIN:-shbot}"
-		command $shbot_cmd connect || {
+		if ! _shbot_resolve_bin; then
+			_shbot_debug "Failed to resolve shbot binary"
+			return 1
+		fi
+		local shbot_cmd="$REPLY"
+		command "$shbot_cmd" connect || {
 			_shbot_debug "Daemon start failed"
 			return 1
 		}
