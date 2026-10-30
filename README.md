@@ -26,8 +26,12 @@ When a new shell starts and no daemon is listening yet, the plugin automatically
 downloads the matching prebuilt `shbot` release binary for your platform
 (`linux-x86_64` or `linux-aarch64`) from GitHub Releases, verifies its SHA-256
 checksum against `sha256sums.txt`, caches it in `~/.cache/shbot/v<version>/`,
-and starts the background daemon. It also provides a `shbot` shell function
-wrapping the cached binary so CLI subcommands (`shbot status`, `shbot reload`,
+and starts the background daemon. Concurrent shell startups coordinate via an
+exclusive file lock (`~/.cache/shbot/.download.lock`) so the archive is only
+downloaded once, and offline startups apply a fast timeout, a 5-minute retry
+cooldown, and automatic fallback to the newest SemVer-compatible version already
+in `~/.cache/shbot/`. It also provides a `shbot` shell function wrapping the
+cached binary so CLI subcommands (`shbot status`, `shbot reload`,
 `shbot loglevel`) work without a local Rust toolchain.
 
 #### Option B: Building from Source with `systemd`

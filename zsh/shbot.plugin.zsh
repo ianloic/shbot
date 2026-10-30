@@ -15,12 +15,14 @@
 
 zmodload zsh/net/socket
 zmodload zsh/system
+zmodload zsh/datetime
 autoload -Uz add-zsh-hook
 
 typeset -g SHBOT_FD=0
 typeset -gA SHBOT_STATE
 typeset -g SHBOT_VERSION="0.1.0"
 typeset -g SHBOT_REPO="${SHBOT_REPO:-ianloic/shbot}"
+typeset -gi SHBOT_LAST_DOWNLOAD_FAILURE=0
 
 function _shbot_debug() {
 	if [[ -n "$SHBOT_DEBUG" ]]; then
@@ -41,12 +43,89 @@ function _shbot_platform() {
 	REPLY="${uname_s}-${uname_m}"
 }
 
-function _shbot_download_bin() {
+function _shbot_semver_compatible() {
+	local req="$1"
+	local cand="$2"
+	local req_maj="${req%%.*}"
+	local req_rest="${req#*.}"
+	local req_min="${req_rest%%.*}"
+	local req_pat="${req_rest#*.}"
+	if [[ "$req_rest" == "$req" || "$req_pat" == "$req_rest" || "$req_pat" == *.* ]]; then
+		return 1
+	fi
+	if [[ -z "$req_maj" || -z "$req_min" || -z "$req_pat" ]]; then
+		return 1
+	fi
+	if [[ "$req_maj" == *[!0-9]* || "$req_min" == *[!0-9]* || "$req_pat" == *[!0-9]* ]]; then
+		return 1
+	fi
+
+	local cand_maj="${cand%%.*}"
+	local cand_rest="${cand#*.}"
+	local cand_min="${cand_rest%%.*}"
+	local cand_pat="${cand_rest#*.}"
+	if [[ "$cand_rest" == "$cand" || "$cand_pat" == "$cand_rest" || "$cand_pat" == *.* ]]; then
+		return 1
+	fi
+	if [[ -z "$cand_maj" || -z "$cand_min" || -z "$cand_pat" ]]; then
+		return 1
+	fi
+	if [[ "$cand_maj" == *[!0-9]* || "$cand_min" == *[!0-9]* || "$cand_pat" == *[!0-9]* ]]; then
+		return 1
+	fi
+
+	if ((req_maj != cand_maj)); then
+		return 1
+	fi
+	if ((req_maj == 0)); then
+		((req_min == cand_min)) && return 0
+		return 1
+	fi
+	return 0
+}
+
+function _shbot_find_fallback_bin() {
+	setopt local_options null_glob
+	local cache_root="$1"
+	local target_plat="$2"
+	local best_bin=""
+	local best_maj=-1 best_min=-1 best_pat=-1
+	local dir bin ver_dir ver
+	for dir in "${cache_root}"/v*; do
+		[[ -d "$dir" ]] || continue
+		bin="${dir}/shbot-${target_plat}"
+		[[ -x "$bin" ]] || continue
+		ver_dir="${dir:t}"
+		ver="${ver_dir#v}"
+		if _shbot_semver_compatible "$SHBOT_VERSION" "$ver"; then
+			local c_rest="${ver#*.}"
+			local c_maj="${ver%%.*}"
+			local c_min="${c_rest%%.*}"
+			local c_pat="${c_rest#*.}"
+			if ((c_maj > best_maj || (c_maj == best_maj && c_min > best_min) || (c_maj == best_maj && c_min == best_min && c_pat > best_pat))); then
+				best_maj=$c_maj
+				best_min=$c_min
+				best_pat=$c_pat
+				best_bin="$bin"
+			fi
+		fi
+	done
+	if [[ -n "$best_bin" ]]; then
+		_shbot_debug "Falling back to SemVer-compatible cached binary v${best_maj}.${best_min}.${best_pat}: $best_bin"
+		REPLY="$best_bin"
+		return 0
+	fi
+	return 1
+}
+
+function _shbot_download_bin_unlocked() {
 	local target_plat="$1"
 	local dest_bin="$2"
 	local cache_dir="${dest_bin:h}"
 	local archive="shbot-v${SHBOT_VERSION}-${target_plat}.tar.gz"
 	local base_url="${SHBOT_RELEASE_BASE_URL:-https://github.com/${SHBOT_REPO}/releases/download/v${SHBOT_VERSION}}"
+	local connect_timeout="${SHBOT_DOWNLOAD_CONNECT_TIMEOUT:-2}"
+	local max_time="${SHBOT_DOWNLOAD_MAX_TIME:-10}"
 
 	command mkdir -p -m 0700 "$cache_dir" 2>/dev/null || return 1
 	local tmp_dir
@@ -54,15 +133,15 @@ function _shbot_download_bin() {
 
 	_shbot_debug "Downloading ${base_url}/${archive}"
 	if command -v curl >/dev/null 2>&1; then
-		if ! command curl -fsSL "${base_url}/${archive}" -o "${tmp_dir}/${archive}" 2>/dev/null ||
-			! command curl -fsSL "${base_url}/sha256sums.txt" -o "${tmp_dir}/sha256sums.txt" 2>/dev/null; then
+		if ! command curl -fsSL --connect-timeout "$connect_timeout" --max-time "$max_time" "${base_url}/${archive}" -o "${tmp_dir}/${archive}" 2>/dev/null ||
+			! command curl -fsSL --connect-timeout "$connect_timeout" --max-time "$max_time" "${base_url}/sha256sums.txt" -o "${tmp_dir}/sha256sums.txt" 2>/dev/null; then
 			_shbot_debug "Failed to download release assets from ${base_url}"
 			command rm -rf "$tmp_dir"
 			return 1
 		fi
 	elif command -v wget >/dev/null 2>&1; then
-		if ! command wget -qO "${tmp_dir}/${archive}" "${base_url}/${archive}" 2>/dev/null ||
-			! command wget -qO "${tmp_dir}/sha256sums.txt" "${base_url}/sha256sums.txt" 2>/dev/null; then
+		if ! command wget -q -T "$connect_timeout" -O "${tmp_dir}/${archive}" "${base_url}/${archive}" 2>/dev/null ||
+			! command wget -q -T "$connect_timeout" -O "${tmp_dir}/sha256sums.txt" "${base_url}/sha256sums.txt" 2>/dev/null; then
 			_shbot_debug "Failed to download release assets from ${base_url}"
 			command rm -rf "$tmp_dir"
 			return 1
@@ -119,6 +198,47 @@ function _shbot_download_bin() {
 	return 0
 }
 
+function _shbot_download_bin() {
+	local target_plat="$1"
+	local dest_bin="$2"
+	local cache_root="${dest_bin:h:h}"
+	local cooldown="${SHBOT_DOWNLOAD_RETRY_COOLDOWN:-300}"
+
+	if ((SHBOT_LAST_DOWNLOAD_FAILURE > 0 && EPOCHSECONDS - SHBOT_LAST_DOWNLOAD_FAILURE < cooldown)); then
+		_shbot_debug "Skipping download (in retry cooldown)"
+		return 1
+	fi
+
+	command mkdir -p -m 0700 "$cache_root" 2>/dev/null || return 1
+	local lock_file="${cache_root}/.download.lock"
+	: >>"$lock_file" 2>/dev/null || return 1
+
+	local lock_fd=""
+	if ! zsystem flock -f lock_fd "$lock_file" 2>/dev/null; then
+		_shbot_debug "Failed to acquire download lock: $lock_file"
+		return 1
+	fi
+
+	if [[ -x "$dest_bin" ]]; then
+		_shbot_debug "Binary appeared while waiting for lock: $dest_bin"
+		exec {lock_fd}<&-
+		SHBOT_LAST_DOWNLOAD_FAILURE=0
+		return 0
+	fi
+
+	local rc=0
+	_shbot_download_bin_unlocked "$target_plat" "$dest_bin" || rc=$?
+	exec {lock_fd}<&-
+
+	if ((rc == 0)); then
+		SHBOT_LAST_DOWNLOAD_FAILURE=0
+		return 0
+	fi
+
+	SHBOT_LAST_DOWNLOAD_FAILURE=$EPOCHSECONDS
+	return 1
+}
+
 function _shbot_resolve_bin() {
 	if [[ -n "$SHBOT_BIN" ]]; then
 		if [[ -x "$SHBOT_BIN" ]]; then
@@ -151,6 +271,10 @@ function _shbot_resolve_bin() {
 
 	if _shbot_download_bin "$target_plat" "$cached_bin"; then
 		REPLY="$cached_bin"
+		return 0
+	fi
+
+	if _shbot_find_fallback_bin "$cache_root" "$target_plat"; then
 		return 0
 	fi
 

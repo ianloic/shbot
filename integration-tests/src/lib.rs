@@ -914,7 +914,8 @@ scope = "nearest(.git)"
             bad_rc
         );
 
-        // 2. Valid sha256sums.txt downloads, extracts into cache, and runs via shbot() wrapper
+        // 2. Valid sha256sums.txt is still blocked while retry cooldown is active,
+        //    then succeeds once cooldown is cleared.
         let sha_out = Command::new("sha256sum").arg(&archive_path).output()?;
         assert!(sha_out.status.success());
         let sha_hex = String::from_utf8_lossy(&sha_out.stdout)
@@ -924,10 +925,19 @@ scope = "nearest(.git)"
             .to_string();
         fs::write(&sums_path, format!("{}  {}\n", sha_hex, archive_name))?;
 
+        env.send_line("_shbot_resolve_bin")?;
+        let cooldown_rc = env.send_line("print -r -- RC=$?")?;
+        assert!(
+            cooldown_rc.contains("RC=1"),
+            "Download must be skipped during retry cooldown, got: {}",
+            cooldown_rc
+        );
+
+        env.send_line("SHBOT_LAST_DOWNLOAD_FAILURE=0")?;
         let out = env.send_line("shbot status")?;
         assert!(
             out.contains("downloaded:status"),
-            "Expected downloaded binary to run, got: {}",
+            "Expected downloaded binary to run after clearing cooldown, got: {}",
             out
         );
 
@@ -940,7 +950,78 @@ scope = "nearest(.git)"
             "Cached binary must exist after download"
         );
 
-        // 3. Local dev-bin symlink takes precedence over cached release binary
+        // 3. Single-flight flock: if another process populates the binary while holding
+        //    .download.lock, _shbot_download_bin reuses it without hitting the network.
+        env.send_line("export SHBOT_VERSION=0.1.1")?;
+        env.send_line("export SHBOT_RELEASE_BASE_URL=file:///nonexistent")?;
+        let v011_dir = env.home_dir.path().join(".cache/shbot/v0.1.1");
+        fs::create_dir_all(&v011_dir)?;
+        let v011_bin = v011_dir.join("shbot-linux-x86_64");
+        fs::write(&v011_bin, "#!/bin/sh\necho \"flock-populated:$*\"\n")?;
+        fs::set_permissions(&v011_bin, fs::Permissions::from_mode(0o755))?;
+        let flock_out = env.send_line(
+            "_shbot_download_bin linux-x86_64 ~/.cache/shbot/v0.1.1/shbot-linux-x86_64 && shbot status",
+        )?;
+        assert!(
+            flock_out.contains("flock-populated:status"),
+            "Expected flock double-check to succeed without downloading, got: {}",
+            flock_out
+        );
+
+        // 4. SemVer-aware offline fallback:
+        //    When SHBOT_VERSION=0.1.5 and download fails (offline):
+        //    - v0.0.9 and v0.2.0 are rejected (incompatible 0.Y minor epoch)
+        //    - v0.1.0 and v0.1.1 are compatible, and the highest patch (v0.1.1) is chosen.
+        fs::remove_dir_all(env.home_dir.path().join(".cache/shbot"))?;
+        for (ver, tag) in [("0.0.9", "v009"), ("0.2.0", "v020")] {
+            let dir = env.home_dir.path().join(format!(".cache/shbot/v{}", ver));
+            fs::create_dir_all(&dir)?;
+            let bin = dir.join("shbot-linux-x86_64");
+            fs::write(&bin, format!("#!/bin/sh\necho \"{}:$*\"\n", tag))?;
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755))?;
+        }
+        env.send_line("export SHBOT_VERSION=0.1.5")?;
+        env.send_line("SHBOT_LAST_DOWNLOAD_FAILURE=0")?;
+        env.send_line("_shbot_resolve_bin")?;
+        let incomp_rc = env.send_line("print -r -- RC=$?")?;
+        assert!(
+            incomp_rc.contains("RC=1"),
+            "Incompatible 0.0.x and 0.2.x cached versions must be rejected for 0.1.5, got: {}",
+            incomp_rc
+        );
+
+        for (ver, tag) in [("0.1.0", "v010"), ("0.1.3", "v013")] {
+            let dir = env.home_dir.path().join(format!(".cache/shbot/v{}", ver));
+            fs::create_dir_all(&dir)?;
+            let bin = dir.join("shbot-linux-x86_64");
+            fs::write(&bin, format!("#!/bin/sh\necho \"{}:$*\"\n", tag))?;
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755))?;
+        }
+        let fallback_out = env.send_line("shbot status")?;
+        assert!(
+            fallback_out.contains("v013:status"),
+            "Expected highest compatible 0.1.x cached version (v0.1.3) to be chosen, got: {}",
+            fallback_out
+        );
+
+        //    For 1.Y.Z (major >= 1), major version is the protocol epoch:
+        //    SHBOT_VERSION=1.2.0 accepts v1.0.4 and v1.1.8 (choosing v1.1.8) and rejects v2.0.0.
+        for (ver, tag) in [("1.0.4", "v104"), ("1.1.8", "v118"), ("2.0.0", "v200")] {
+            let dir = env.home_dir.path().join(format!(".cache/shbot/v{}", ver));
+            fs::create_dir_all(&dir)?;
+            let bin = dir.join("shbot-linux-x86_64");
+            fs::write(&bin, format!("#!/bin/sh\necho \"{}:$*\"\n", tag))?;
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755))?;
+        }
+        env.send_line("export SHBOT_VERSION=1.2.0")?;
+        let fallback_v1 = env.send_line("shbot status")?;
+        assert!(
+            fallback_v1.contains("v118:status"),
+            "Expected highest compatible 1.x cached version (v1.1.8) to be chosen, got: {}",
+            fallback_v1
+        );
+
+        // 5. Local dev-bin symlink takes precedence over cached release binary
         let state_dir = env.home_dir.path().join(".local/state/shbot");
         fs::create_dir_all(&state_dir)?;
         let dev_target = env.home_dir.path().join("shbot-dev");

@@ -83,10 +83,19 @@ using `systemd` socket activation or a built-in self-spawn fallback mechanism:
      symlink managed by `mise run dev-link` / `mise run dev-unlink`)
    - `${XDG_CACHE_HOME:-$HOME/.cache}/shbot/v<SHBOT_VERSION>/shbot-<os>-<arch>`
      (cached release binary)
-   - If the cached release binary is missing, the plugin downloads the matching
-     prebuilt tarball and `sha256sums.txt` from GitHub Releases, verifies the
-     SHA-256 digest, and atomically extracts the binary into the cache directory
-     (`0700`).
+   - If the cached release binary is missing, the plugin acquires a
+     single-flight file lock (`zsystem flock` on
+     `~/.cache/shbot/.download.lock`), re-checks whether another concurrent
+     shell already populated the binary, and otherwise downloads the matching
+     prebuilt tarball and `sha256sums.txt` from GitHub Releases with bounded
+     connect/transfer timeouts (`--connect-timeout 2` / `--max-time 10`),
+     verifies the SHA-256 digest, and atomically extracts the binary into the
+     cache directory (`0700`).
+   - If the download fails (e.g. while offline), the plugin records a retry
+     cooldown (`SHBOT_DOWNLOAD_RETRY_COOLDOWN`, default 300 seconds) so
+     subsequent prompts do not repeatedly stall on network timeouts, and falls
+     back to the highest SemVer-compatible version already cached in
+     `~/.cache/shbot/v*/`.
 4. **Foreground Launcher (`shbot connect`):** Once resolved, the shell
    synchronously runs `<shbot_bin> connect`.
 5. **Stale Socket Cleanup:** The launcher probes the existing socket file; a
@@ -193,3 +202,19 @@ manual debugging.
   storing the value in `$SHBOT_STATE`, so users always observe the raw payload.
 - `shbot daemon status:\n...`: A multi-line response provided to the
   `shbot status` CLI command containing detailed client and metric information.
+
+### Protocol Versioning & SemVer Compatibility
+
+The Zsh plugin and Rust daemon follow Cargo-style Semantic Versioning
+(`MAJOR.MINOR.PATCH`) for the socket protocol and CLI contract:
+
+- **Pre-1.0 (`0.Y.Z`)**: The **minor** version `Y` defines the protocol epoch.
+  Patch releases (`0.Y.0` → `0.Y.1`) are protocol-compatible; breaking protocol
+  changes bump `Y` (`0.1.x` → `0.2.0`).
+- **1.0 and later (`X.Y.Z`, `X >= 1`)**: The **major** version `X` defines the
+  protocol epoch. Minor and patch releases within `X.*.*` preserve protocol
+  compatibility; breaking protocol changes bump `X`.
+- When offline and the target `v<SHBOT_VERSION>` binary is not yet cached,
+  `_shbot_find_fallback_bin` only falls back to cached binaries matching the
+  current protocol epoch (selecting the highest compatible version) and refuses
+  incompatible epochs.
