@@ -20,7 +20,7 @@ autoload -Uz add-zsh-hook
 
 typeset -g SHBOT_FD=0
 typeset -gA SHBOT_STATE
-typeset -g SHBOT_VERSION="0.1.0"
+typeset -g SHBOT_VERSION="0.1.1"
 typeset -g SHBOT_REPO="${SHBOT_REPO:-ianloic/shbot}"
 typeset -gi SHBOT_LAST_DOWNLOAD_FAILURE=0
 typeset -ga SHBOT_SUPPORTED_PLATFORMS
