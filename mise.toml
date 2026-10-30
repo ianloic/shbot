@@ -112,8 +112,8 @@ if [[ ! "$VERSION" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then
     echo "Usage: mise run release <X.Y.Z>" >&2
     exit 1
 fi
-sed -i -E "0,/^version = \".*\"/s//version = \"${VERSION}\"/" daemon/Cargo.toml
-sed -i -E "s/^typeset -g SHBOT_VERSION=\".*\"/typeset -g SHBOT_VERSION=\"${VERSION}\"/" zsh/shbot.plugin.zsh
+sed -i -E '0,/^version = ".*"/s//version = "'"${VERSION}"'"/' daemon/Cargo.toml
+sed -i -E 's/^typeset -g SHBOT_VERSION=".*"/typeset -g SHBOT_VERSION="'"${VERSION}"'"/' zsh/shbot.plugin.zsh
 cargo check -p shbot
 mise run fmt
 if ! git diff --quiet daemon/Cargo.toml Cargo.lock zsh/shbot.plugin.zsh; then

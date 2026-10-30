@@ -312,6 +312,7 @@ function _shbot_update_vcs_status() {
 	local payload="$1"
 	if [[ -z "$payload" ]]; then
 		unset VCS_STATUS_{WORKDIR,COMMIT,LOCAL_BRANCH,REMOTE_BRANCH,REMOTE_NAME,REMOTE_URL,ACTION,INDEX_SIZE,NUM_STAGED,NUM_UNSTAGED,NUM_CONFLICTED,NUM_UNTRACKED,HAS_STAGED,HAS_UNSTAGED,HAS_CONFLICTED,HAS_UNTRACKED,COMMITS_AHEAD,COMMITS_BEHIND,STASHES,TAG,NUM_UNSTAGED_DELETED,NUM_STAGED_NEW,NUM_STAGED_DELETED,PUSH_REMOTE_NAME,PUSH_REMOTE_URL,PUSH_COMMITS_AHEAD,PUSH_COMMITS_BEHIND,NUM_SKIP_WORKTREE,NUM_ASSUME_UNCHANGED,COMMIT_ENCODING,COMMIT_SUMMARY}
+		typeset -g VCS_STATUS_RESULT=norepo-sync
 		return 0
 	fi
 
@@ -329,6 +330,7 @@ function _shbot_update_vcs_status() {
 
 	if [[ -z "${resp[1]}" ]]; then
 		unset VCS_STATUS_{WORKDIR,COMMIT,LOCAL_BRANCH,REMOTE_BRANCH,REMOTE_NAME,REMOTE_URL,ACTION,INDEX_SIZE,NUM_STAGED,NUM_UNSTAGED,NUM_CONFLICTED,NUM_UNTRACKED,HAS_STAGED,HAS_UNSTAGED,HAS_CONFLICTED,HAS_UNTRACKED,COMMITS_AHEAD,COMMITS_BEHIND,STASHES,TAG,NUM_UNSTAGED_DELETED,NUM_STAGED_NEW,NUM_STAGED_DELETED,PUSH_REMOTE_NAME,PUSH_REMOTE_URL,PUSH_COMMITS_AHEAD,PUSH_COMMITS_BEHIND,NUM_SKIP_WORKTREE,NUM_ASSUME_UNCHANGED,COMMIT_ENCODING,COMMIT_SUMMARY}
+		typeset -g VCS_STATUS_RESULT=norepo-sync
 		return 0
 	fi
 
@@ -429,7 +431,7 @@ function _shbot_read_handler() {
 	local fd=$1
 	local line
 
-	if ! read -r -u $fd line; then
+	if ! IFS= read -r -u $fd line; then
 		_shbot_debug "Failed to read from FD $fd (disconnecting)"
 		zle -F $fd
 		exec {fd}<&-
@@ -444,7 +446,10 @@ function _shbot_read_handler() {
 
 	if [[ "$msg_type" == "update" ]]; then
 		local state_id="${rest%% *}"
-		local payload="${rest#* }"
+		local payload=""
+		if [[ "$rest" == *" "* ]]; then
+			payload="${rest#* }"
+		fi
 		local marker=$'\x01' nl=$'\n' cr=$'\r' us=$'\x1f'
 		payload="${payload//'%25'/$marker}"
 		payload="${payload//'%0A'/$nl}"

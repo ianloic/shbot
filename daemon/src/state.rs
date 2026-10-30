@@ -113,6 +113,7 @@ impl DaemonState {
         }
     }
 
+    #[cfg(test)]
     pub async fn get_cwd(&self, pid: Pid) -> Option<PathBuf> {
         self.clients.read().await.get(&pid).map(|c| c.cwd.clone())
     }
@@ -226,7 +227,6 @@ impl DaemonState {
         watcher: Arc<SyncWatcher>,
         config: &Config,
     ) {
-        let old_cwd = self.get_cwd(pid).await;
         self.update_cwd(pid, path.clone()).await;
 
         let mut new_scopes = HashSet::new();
@@ -237,16 +237,22 @@ impl DaemonState {
         }
 
         let mut old_scopes = HashSet::new();
-        if let Some(old) = &old_cwd {
-            for (name, state_config) in &config.state {
-                if let Some(root) = state_config.scope.evaluate(old) {
-                    old_scopes.insert((name.clone(), root));
+        {
+            let scoped_states = self.scoped_states.read().await;
+            for (key, state) in scoped_states.iter() {
+                if state.subscribers.read().await.contains(&pid) {
+                    old_scopes.insert(key.clone());
                 }
             }
         }
 
         let to_add: Vec<_> = new_scopes.difference(&old_scopes).cloned().collect();
         let to_remove: Vec<_> = old_scopes.difference(&new_scopes).cloned().collect();
+        let cleared_states: Vec<StateId> = to_remove
+            .iter()
+            .map(|(name, _)| name.clone())
+            .filter(|name| !new_scopes.iter().any(|(new_name, _)| new_name == name))
+            .collect();
 
         let mut newly_created_scopes = Vec::new();
         let mut initial_payloads = Vec::new();
@@ -315,10 +321,15 @@ impl DaemonState {
             }
         }
 
-        // Send any cached payloads
-        if !initial_payloads.is_empty() {
+        // Clear any states that are no longer in scope and send any cached payloads
+        if !cleared_states.is_empty() || !initial_payloads.is_empty() {
             let mut clients = self.clients.write().await;
             if let Some(client) = clients.get_mut(&pid) {
+                for name in cleared_states {
+                    client.last_state.remove(&name);
+                    let msg = format!("update {} \n", name);
+                    let _ = client.sender.try_send(msg);
+                }
                 for (name, payload) in initial_payloads {
                     let msg = format!("update {} {}\n", name, encode_payload(&payload));
                     client.last_state.insert(name, payload);
@@ -359,55 +370,55 @@ impl DaemonState {
         watcher: Arc<SyncWatcher>,
         config: &Config,
     ) {
-        let old_cwd = self.get_cwd(pid).await;
         self.remove_client(pid).await;
-        if let Some(old) = old_cwd {
-            let mut old_scopes = HashSet::new();
-            for (name, state_config) in &config.state {
-                if let Some(root) = state_config.scope.evaluate(&old) {
-                    old_scopes.insert((name.clone(), root));
+        let mut old_scopes = HashSet::new();
+        {
+            let scoped_states = self.scoped_states.read().await;
+            for (key, state) in scoped_states.iter() {
+                if state.subscribers.read().await.contains(&pid) {
+                    old_scopes.insert(key.clone());
                 }
             }
+        }
 
-            let mut scoped_states = self.scoped_states.write().await;
-            for key in old_scopes {
-                let mut is_orphaned = false;
-                if let Some(state) = scoped_states.get(&key) {
-                    let mut subs = state.subscribers.write().await;
-                    subs.remove(&pid);
-                    if subs.is_empty() {
-                        is_orphaned = true;
-                    }
+        let mut scoped_states = self.scoped_states.write().await;
+        for key in old_scopes {
+            let mut is_orphaned = false;
+            if let Some(state) = scoped_states.get(&key) {
+                let mut subs = state.subscribers.write().await;
+                subs.remove(&pid);
+                if subs.is_empty() {
+                    is_orphaned = true;
                 }
-                if is_orphaned {
-                    scoped_states.remove(&key);
-                    if let Some(state_config) = config.state.get(&key.0) {
-                        if state_config.invalidate.watch.is_some()
-                            || state_config.invalidate.pwd.unwrap_or(false)
-                        {
-                            let target = &key.1;
-                            let mut keep = false;
-                            for (other_key, _) in scoped_states.iter() {
-                                if other_key.1 == *target {
-                                    if let Some(sc) = config.state.get(&other_key.0) {
-                                        if sc.invalidate.watch.is_some()
-                                            || sc.invalidate.pwd.unwrap_or(false)
-                                        {
-                                            keep = true;
-                                            break;
-                                        }
+            }
+            if is_orphaned {
+                scoped_states.remove(&key);
+                if let Some(state_config) = config.state.get(&key.0) {
+                    if state_config.invalidate.watch.is_some()
+                        || state_config.invalidate.pwd.unwrap_or(false)
+                    {
+                        let target = &key.1;
+                        let mut keep = false;
+                        for (other_key, _) in scoped_states.iter() {
+                            if other_key.1 == *target {
+                                if let Some(sc) = config.state.get(&other_key.0) {
+                                    if sc.invalidate.watch.is_some()
+                                        || sc.invalidate.pwd.unwrap_or(false)
+                                    {
+                                        keep = true;
+                                        break;
                                     }
                                 }
                             }
-                            if !keep {
-                                let watcher_clone = watcher.clone();
-                                let target_clone = key.1.clone();
-                                let _ = tokio::task::spawn_blocking(move || {
-                                    watcher_clone.unwatch(&target_clone);
-                                })
-                                .await;
-                                self.git_latencies.write().await.remove(&key.1);
-                            }
+                        }
+                        if !keep {
+                            let watcher_clone = watcher.clone();
+                            let target_clone = key.1.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                watcher_clone.unwatch(&target_clone);
+                            })
+                            .await;
+                            self.git_latencies.write().await.remove(&key.1);
                         }
                     }
                 }
@@ -448,7 +459,10 @@ impl DaemonState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
+    use std::process::Command;
+    use tempfile::tempdir;
     use tokio::sync::mpsc;
 
     #[tokio::test]
@@ -591,10 +605,81 @@ mod tests {
             .await
             .insert(PathBuf::from("/tmp/myrepo"), 1500);
 
-        let config = crate::config::Config::default();
+        let config = Config::default();
         let dump = state.get_status_dump(2, &config).await;
         assert!(dump.contains("Git Monitor Latencies:"));
         assert!(dump.contains("/tmp/myrepo"));
         assert!(dump.contains("1.5 ms"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_cd_out_of_git_repo_clears_state() {
+        let state = DaemonState::new();
+        let watcher = SyncWatcher::new();
+        let config = Config::default();
+        let (tx, mut rx) = mpsc::channel(10);
+
+        let dir = tempdir().unwrap();
+        let repo_dir = dir.path().join("repo");
+        let non_repo_dir = dir.path().join("outside");
+        fs::create_dir_all(&repo_dir).unwrap();
+        fs::create_dir_all(&non_repo_dir).unwrap();
+
+        let status = Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&repo_dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        state.add_client(1, PathBuf::new(), tx).await;
+
+        // 1. cd into the git repository
+        state
+            .handle_cd(1, repo_dir.clone(), watcher.clone(), &config)
+            .await;
+        let msg_in_repo = rx
+            .try_recv()
+            .expect("Expected git state update on entering repo");
+        assert!(msg_in_repo.starts_with("update git "));
+        assert!(msg_in_repo.contains(repo_dir.to_str().unwrap()));
+        assert!(
+            state
+                .clients
+                .read()
+                .await
+                .get(&1)
+                .unwrap()
+                .last_state
+                .contains_key("git")
+        );
+
+        // 2. cd out of the git repository into a non-git directory
+        state
+            .handle_cd(1, non_repo_dir.clone(), watcher.clone(), &config)
+            .await;
+        let msg_out_of_repo = rx
+            .try_recv()
+            .expect("Expected empty git update on leaving repo");
+        assert_eq!(msg_out_of_repo, "update git \n");
+        assert!(
+            !state
+                .clients
+                .read()
+                .await
+                .get(&1)
+                .unwrap()
+                .last_state
+                .contains_key("git")
+        );
+
+        // 3. cd back into the git repository and ensure state is sent again
+        state
+            .handle_cd(1, repo_dir.clone(), watcher.clone(), &config)
+            .await;
+        let msg_reenter = rx
+            .try_recv()
+            .expect("Expected git state update on re-entering repo");
+        assert_eq!(msg_reenter, msg_in_repo);
     }
 }

@@ -18,6 +18,8 @@ pub mod test_env;
 #[cfg(test)]
 mod tests {
     use super::test_env::TestEnv;
+    use std::error::Error;
+    use std::fs;
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
 
@@ -233,6 +235,24 @@ mod tests {
         assert!(out.contains("body"), "got: {}", out);
         assert!(!out.contains("%0A"), "payload not decoded: {}", out);
 
+        // Sending an empty git update ("update git \n") must clear SHBOT_STATE[git],
+        // unset all VCS_STATUS_* variables, and set VCS_STATUS_RESULT=norepo-sync.
+        stream.write_all(b"update git \n")?;
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line(
+                "print -r -- \"ST=${SHBOT_STATE[git]}|WD=${VCS_STATUS_WORKDIR-unset}|BR=${VCS_STATUS_LOCAL_BRANCH-unset}|RES=${VCS_STATUS_RESULT}\"",
+            )?;
+            Ok::<bool, Box<dyn Error>>(out.contains("ST=|WD=unset|BR=unset|RES=norepo-sync"))
+        })?;
+        let out = env.send_line(
+            "print -r -- \"ST=${SHBOT_STATE[git]}|WD=${VCS_STATUS_WORKDIR-unset}|BR=${VCS_STATUS_LOCAL_BRANCH-unset}|RES=${VCS_STATUS_RESULT}\"",
+        )?;
+        assert!(
+            out.contains("ST=|WD=unset|BR=unset|RES=norepo-sync"),
+            "Empty git update must clear git state and VCS_STATUS_*, got: {}",
+            out
+        );
+
         Ok(())
     }
 
@@ -358,6 +378,57 @@ mod tests {
         assert_eq!(
             post_untracked, "1",
             "After file creation, untracked files should be 1"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_git_status_clears_on_cd_out_of_repo() -> Result<(), Box<dyn Error>> {
+        let mut env = TestEnv::new()?;
+        let repo_path = env.setup_git_repo("myrepo")?;
+        let outside_path = env.home_dir.path().join("outside_repo");
+        fs::create_dir_all(&outside_path)?;
+
+        env.start_daemon()?;
+
+        env.send_line("export SHBOT_SET_VCS_STATUS=1")?;
+        env.send_line(&format!("cd {}", repo_path.display()))?;
+        env.source_plugin()?;
+
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line(
+                "print -r -- \"IN_REPO=${VCS_STATUS_LOCAL_BRANCH}|${VCS_STATUS_RESULT}\"",
+            )?;
+            Ok::<bool, Box<dyn Error>>(out.contains("IN_REPO=main|ok-sync"))
+        })?;
+        let in_repo_out =
+            env.send_line("print -r -- \"IN_REPO=${VCS_STATUS_LOCAL_BRANCH}|${VCS_STATUS_RESULT}\"")?;
+        assert!(
+            in_repo_out.contains("IN_REPO=main|ok-sync"),
+            "Expected git status in repo, got: {}",
+            in_repo_out
+        );
+
+        // Now cd out of the git repository into a non-git directory
+        env.send_line(&format!("cd {}", outside_path.display()))?;
+
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line(
+                "print -r -- \"OUT_REPO=${SHBOT_STATE[git]}|${VCS_STATUS_WORKDIR-unset}|${VCS_STATUS_LOCAL_BRANCH-unset}|${VCS_STATUS_RESULT}\"",
+            )?;
+            Ok::<bool, Box<dyn Error>>(out.contains("OUT_REPO=|unset|unset|norepo-sync"))
+        })?;
+        let out_repo = env.send_line(
+            "print -r -- \"OUT_REPO=${SHBOT_STATE[git]}|${VCS_STATUS_WORKDIR-unset}|${VCS_STATUS_LOCAL_BRANCH-unset}|${VCS_STATUS_RESULT}\"",
+        )?;
+
+        env.kill_daemon();
+
+        assert!(
+            out_repo.contains("OUT_REPO=|unset|unset|norepo-sync"),
+            "Expected git status to be cleared after cd out of repo, got: {}",
+            out_repo
         );
 
         Ok(())
@@ -860,7 +931,6 @@ scope = "nearest(.git)"
 
     #[test]
     fn test_binary_resolution_and_auto_download() -> Result<(), Box<dyn std::error::Error>> {
-        use std::fs;
         use std::os::unix::fs::{PermissionsExt, symlink};
         use std::process::Command;
 
@@ -871,6 +941,7 @@ scope = "nearest(.git)"
         env.send_line("export SHBOT_UNAME_S=Linux")?;
         env.send_line("export SHBOT_UNAME_M=x86_64")?;
         env.source_plugin()?;
+        env.send_line("export SHBOT_VERSION=0.1.0")?;
 
         // Prepare a fake release directory served via file://
         let release_dir = env.home_dir.path().join("releases");

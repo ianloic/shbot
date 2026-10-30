@@ -179,7 +179,8 @@ manual debugging.
   rejected with an `error:` reply and the connection is closed.
 - `cd <path>`: Alerts the daemon that the user has changed directories. This
   immediately triggers Git state evaluation and any matching watch tasks for the
-  new directory.
+  new directory, and sends an empty `update <state_id>` for any previously
+  subscribed state whose scope no longer matches `<path>`.
 - `status`: Sent by the `shbot status` CLI command to request a dump of the
   daemon's internal state (including the daemon PID, every client's PID and CWD,
   and state metrics). The daemon will respond and then immediately close the
