@@ -23,6 +23,8 @@ typeset -gA SHBOT_STATE
 typeset -g SHBOT_VERSION="0.1.0"
 typeset -g SHBOT_REPO="${SHBOT_REPO:-ianloic/shbot}"
 typeset -gi SHBOT_LAST_DOWNLOAD_FAILURE=0
+typeset -ga SHBOT_SUPPORTED_PLATFORMS
+SHBOT_SUPPORTED_PLATFORMS=("linux-x86_64" "linux-aarch64")
 
 function _shbot_debug() {
 	if [[ -n "$SHBOT_DEBUG" ]]; then
@@ -41,6 +43,17 @@ function _shbot_platform() {
 		uname_m="x86_64"
 	fi
 	REPLY="${uname_s}-${uname_m}"
+}
+
+function _shbot_platform_supported() {
+	local target_plat="$1"
+	local plat
+	for plat in "${SHBOT_SUPPORTED_PLATFORMS[@]}"; do
+		if [[ "$plat" == "$target_plat" ]]; then
+			return 0
+		fi
+	done
+	return 1
 }
 
 function _shbot_semver_compatible() {
@@ -203,6 +216,11 @@ function _shbot_download_bin() {
 	local dest_bin="$2"
 	local cache_root="${dest_bin:h:h}"
 	local cooldown="${SHBOT_DOWNLOAD_RETRY_COOLDOWN:-300}"
+
+	if ! _shbot_platform_supported "$target_plat"; then
+		_shbot_debug "Skipping download: platform ${target_plat} is not in SHBOT_SUPPORTED_PLATFORMS"
+		return 1
+	fi
 
 	if ((SHBOT_LAST_DOWNLOAD_FAILURE > 0 && EPOCHSECONDS - SHBOT_LAST_DOWNLOAD_FAILURE < cooldown)); then
 		_shbot_debug "Skipping download (in retry cooldown)"

@@ -893,7 +893,28 @@ scope = "nearest(.git)"
             .status()?;
         assert!(status.success());
 
-        // 1. Tampered sha256sums.txt must fail download and leave cache empty
+        // 1. Unsupported platforms (not in SHBOT_SUPPORTED_PLATFORMS) must fail immediately
+        //    without creating .download.lock or attempting a download.
+        env.send_line("export SHBOT_UNAME_S=Darwin")?;
+        env.send_line("export SHBOT_UNAME_M=arm64")?;
+        env.send_line("_shbot_resolve_bin")?;
+        let unsup_rc = env.send_line("print -r -- RC=$?")?;
+        assert!(
+            unsup_rc.contains("RC=1"),
+            "Unsupported platform must not resolve a prebuilt, got: {}",
+            unsup_rc
+        );
+        assert!(
+            !env.home_dir
+                .path()
+                .join(".cache/shbot/.download.lock")
+                .exists(),
+            "Unsupported platform must not acquire download lock or attempt download"
+        );
+        env.send_line("export SHBOT_UNAME_S=Linux")?;
+        env.send_line("export SHBOT_UNAME_M=x86_64")?;
+
+        // 2. Tampered sha256sums.txt must fail download and leave cache empty
         let sums_path = release_dir.join("sha256sums.txt");
         fs::write(
             &sums_path,

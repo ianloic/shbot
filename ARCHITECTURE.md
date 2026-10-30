@@ -83,14 +83,16 @@ using `systemd` socket activation or a built-in self-spawn fallback mechanism:
      symlink managed by `mise run dev-link` / `mise run dev-unlink`)
    - `${XDG_CACHE_HOME:-$HOME/.cache}/shbot/v<SHBOT_VERSION>/shbot-<os>-<arch>`
      (cached release binary)
-   - If the cached release binary is missing, the plugin acquires a
-     single-flight file lock (`zsystem flock` on
-     `~/.cache/shbot/.download.lock`), re-checks whether another concurrent
-     shell already populated the binary, and otherwise downloads the matching
-     prebuilt tarball and `sha256sums.txt` from GitHub Releases with bounded
-     connect/transfer timeouts (`--connect-timeout 2` / `--max-time 10`),
-     verifies the SHA-256 digest, and atomically extracts the binary into the
-     cache directory (`0700`).
+   - If the cached release binary is missing, the plugin first checks whether
+     `<os>-<arch>` is listed in `SHBOT_SUPPORTED_PLATFORMS` (`linux-x86_64`,
+     `linux-aarch64`), skipping any download attempt on unsupported platforms.
+     For supported platforms, it acquires a single-flight file lock
+     (`zsystem flock` on `~/.cache/shbot/.download.lock`), re-checks whether
+     another concurrent shell already populated the binary, and otherwise
+     downloads the matching prebuilt tarball and `sha256sums.txt` from GitHub
+     Releases with bounded connect/transfer timeouts (`--connect-timeout 2` /
+     `--max-time 10`), verifies the SHA-256 digest, and atomically extracts the
+     binary into the cache directory (`0700`).
    - If the download fails (e.g. while offline), the plugin records a retry
      cooldown (`SHBOT_DOWNLOAD_RETRY_COOLDOWN`, default 300 seconds) so
      subsequent prompts do not repeatedly stall on network timeouts, and falls
