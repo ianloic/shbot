@@ -29,9 +29,8 @@ use crate::server::{LOG_RELOAD_HANDLE, ensure_owner_only_dir, restrict_to_owner}
 use clap::Parser;
 use cli::{Cli, Commands};
 use std::env;
-use std::fs;
-use std::fs::File;
-use std::io::{Read, Write};
+use std::fs::{self, File};
+use std::io::{self, IsTerminal, Read, Write};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio, exit};
@@ -212,12 +211,12 @@ fn setup_logging(log_file: Option<&Path>) -> Result<()> {
         restrict_to_owner(path)?;
         tracing_subscriber::registry()
             .with(filter_layer)
-            .with(format_layer.with_writer(file))
+            .with(format_layer.with_ansi(false).with_writer(file))
             .init();
     } else {
         tracing_subscriber::registry()
             .with(filter_layer)
-            .with(format_layer)
+            .with(format_layer.with_ansi(io::stdout().is_terminal()))
             .init();
     }
 
@@ -278,24 +277,30 @@ fn get_hostname() -> String {
         })
 }
 
-// Socket path convention: ~/.local/state/shbot/socket/$HOST.socket
+// Socket path convention: ${SHBOT_SOCKET:-${XDG_STATE_HOME:-$HOME/.local/state}/shbot/$HOST.socket}
 pub fn get_socket_path() -> Result<PathBuf> {
-    let home = env::var("HOME").expect("HOME env var not set");
+    if let Ok(sock) = env::var("SHBOT_SOCKET")
+        && !sock.is_empty()
+    {
+        return Ok(PathBuf::from(sock));
+    }
+
+    let state_home = env::var("XDG_STATE_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = env::var("HOME").expect("HOME env var not set");
+            PathBuf::from(home).join(".local").join("state")
+        });
     let host = get_hostname();
 
-    let path = PathBuf::from(home)
-        .join(".local")
-        .join("state")
-        .join("shbot")
-        .join(format!("{}.socket", host));
-
-    Ok(path)
+    Ok(state_home.join("shbot").join(format!("{}.socket", host)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
     use std::os::unix::net::UnixListener as StdUnixListener;
 
     #[test]
@@ -312,7 +317,12 @@ mod tests {
     #[test]
     fn test_get_socket_path() {
         temp_env::with_vars(
-            [("HOME", Some("/tmp/testhome")), ("HOST", Some("testhost"))],
+            [
+                ("HOME", Some("/tmp/testhome")),
+                ("HOST", Some("testhost")),
+                ("SHBOT_SOCKET", None),
+                ("XDG_STATE_HOME", None),
+            ],
             || {
                 let path = get_socket_path().unwrap();
                 assert_eq!(
@@ -321,6 +331,27 @@ mod tests {
                 );
             },
         );
+
+        temp_env::with_vars(
+            [
+                ("HOME", Some("/tmp/testhome")),
+                ("HOST", Some("testhost")),
+                ("SHBOT_SOCKET", None),
+                ("XDG_STATE_HOME", Some("/tmp/custom_state")),
+            ],
+            || {
+                let path = get_socket_path().unwrap();
+                assert_eq!(
+                    path,
+                    PathBuf::from("/tmp/custom_state/shbot/testhost.socket")
+                );
+            },
+        );
+
+        temp_env::with_vars([("SHBOT_SOCKET", Some("/tmp/explicit.socket"))], || {
+            let path = get_socket_path().unwrap();
+            assert_eq!(path, PathBuf::from("/tmp/explicit.socket"));
+        });
     }
 
     #[test]
@@ -330,6 +361,8 @@ mod tests {
             [
                 ("HOME", Some(dir.path().to_str().unwrap())),
                 ("HOST", Some("testhost")),
+                ("SHBOT_SOCKET", None),
+                ("XDG_STATE_HOME", None),
             ],
             || {
                 let socket_path = get_socket_path().unwrap();

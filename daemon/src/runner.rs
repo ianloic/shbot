@@ -23,7 +23,7 @@ use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::{Duration, sleep};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
 const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(1);
@@ -249,26 +249,29 @@ pub async fn evaluate_scoped_state(
 ) {
     if let Some(state_config) = config.state.get(name) {
         if !state.begin_evaluation(name, scope_root).await {
-            tracing::debug!(
-                "Skipping duplicate evaluation of state '{}' at {:?}",
-                name,
-                scope_root
+            debug!(
+                "Skipping duplicate evaluation of state '{}' at {:?} (queued rerun)",
+                name, scope_root
             );
             return;
         }
         let command_timeout = Duration::from_secs(config.daemon.command_timeout_sec);
-        if let Some(stdout) = evaluate_state_source(
-            name,
-            &state_config.source,
-            scope_root,
-            state,
-            command_timeout,
-        )
-        .await
-        {
-            state.update_scoped_state(name, scope_root, &stdout).await;
+        loop {
+            if let Some(stdout) = evaluate_state_source(
+                name,
+                &state_config.source,
+                scope_root,
+                state,
+                command_timeout,
+            )
+            .await
+            {
+                state.update_scoped_state(name, scope_root, &stdout).await;
+            }
+            if !state.finish_evaluation_step(name, scope_root).await {
+                break;
+            }
         }
-        state.end_evaluation(name, scope_root).await;
     }
 }
 
@@ -283,66 +286,38 @@ pub async fn evaluate_watch_tasks(
     };
 
     for (name, scope_root) in active_scopes {
-        if let Some(state_config) = config.state.get(&name) {
-            let watch_pattern = if let Some(w) = &state_config.invalidate.watch {
-                Some(w.as_str())
-            } else if let StateSource::File { file } = &state_config.source {
-                Some(file.as_str())
-            } else {
-                None
-            };
+        if let Some(state_config) = config.state.get(&name)
+            && state_config.watch_pattern().is_some()
+        {
+            let mut matched = false;
 
-            if let Some(watch_pattern) = watch_pattern {
-                let mut matched = false;
+            if let Some(paths) = affected_paths {
+                let Some(glob) = state_config.watch_matcher(&name) else {
+                    continue;
+                };
+                let ignores = state_config.ignore_set();
 
-                if let Some(paths) = affected_paths {
-                    let builder = globset::GlobBuilder::new(watch_pattern);
-                    let glob = match builder.build() {
-                        Ok(g) => g.compile_matcher(),
-                        Err(e) => {
-                            error!(
-                                "Invalid glob pattern '{}' for state '{}': {}",
-                                watch_pattern, name, e
-                            );
+                for path in paths {
+                    if let Ok(rel_path) = path.strip_prefix(&scope_root) {
+                        if let Some(ig) = ignores
+                            && ig.is_match(rel_path)
+                        {
                             continue;
                         }
-                    };
-
-                    let mut ignores = None;
-                    if let Some(ignore_patterns) = &state_config.invalidate.ignore {
-                        let mut builder = globset::GlobSetBuilder::new();
-                        for pattern in ignore_patterns {
-                            if let Ok(g) = globset::Glob::new(pattern) {
-                                builder.add(g);
-                            }
-                        }
-                        if let Ok(set) = builder.build() {
-                            ignores = Some(set);
+                        if glob.is_match(rel_path) {
+                            debug!("Noticed directory change: {:?}", path);
+                            matched = true;
+                            break;
                         }
                     }
-
-                    for path in paths {
-                        if let Ok(rel_path) = path.strip_prefix(&scope_root) {
-                            if let Some(ig) = &ignores {
-                                if ig.is_match(rel_path) {
-                                    continue;
-                                }
-                            }
-                            if glob.is_match(rel_path) {
-                                tracing::info!("Noticed directory change: {:?}", path);
-                                matched = true;
-                                break;
-                            }
-                        }
-                    }
-                } else {
-                    // If affected_paths is None, force execution
-                    matched = true;
                 }
+            } else {
+                // If affected_paths is None, force execution
+                matched = true;
+            }
 
-                if matched {
-                    evaluate_scoped_state(&name, &scope_root, state, config).await;
-                }
+            if matched {
+                evaluate_scoped_state(&name, &scope_root, state, config).await;
             }
         }
     }
@@ -356,6 +331,7 @@ mod tests {
     use crate::state::{DaemonState, ScopedState};
 
     use std::collections::HashSet;
+    use std::process::{self, Command as StdCommand};
     use std::sync::Arc;
     use tokio::sync::{RwLock, watch};
 
@@ -440,6 +416,13 @@ mod tests {
         );
 
         let cwd = tempfile::tempdir().unwrap();
+        state.scoped_states.write().await.insert(
+            (StateId::from("rust_files"), cwd.path().to_path_buf()),
+            Arc::new(ScopedState {
+                subscribers: RwLock::new(HashSet::new()),
+                last_value: RwLock::new(None),
+            }),
+        );
 
         // No paths means forced evaluation
         evaluate_watch_tasks(&state, &config, None).await;
@@ -512,12 +495,9 @@ mod tests {
             "timeout must not wait for the full command duration"
         );
 
-        let ps = std::process::Command::new("ps")
-            .arg("-ef")
-            .output()
-            .unwrap();
+        let ps = StdCommand::new("ps").arg("-ef").output().unwrap();
         let ps_output = String::from_utf8_lossy(&ps.stdout);
-        let test_pid = std::process::id().to_string();
+        let test_pid = process::id().to_string();
         assert!(
             !ps_output
                 .lines()
@@ -547,13 +527,21 @@ mod tests {
         assert!(state.begin_evaluation(&name, &root).await);
         assert!(
             !state.begin_evaluation(&name, &root).await,
-            "second evaluation of the same scope must be skipped"
+            "second evaluation of the same scope must be skipped and mark dirty latch"
         );
-        state.end_evaluation(&name, &root).await;
+        assert!(
+            state.finish_evaluation_step(&name, &root).await,
+            "dirty latch must request one trailing evaluation pass"
+        );
+        assert!(
+            !state.finish_evaluation_step(&name, &root).await,
+            "once trailing pass completes without new triggers, evaluation must finish"
+        );
         assert!(
             state.begin_evaluation(&name, &root).await,
             "evaluation must be re-entrant after completion"
         );
+        state.end_evaluation(&name, &root).await;
     }
 
     #[tokio::test]
@@ -583,6 +571,13 @@ mod tests {
         );
 
         let cwd = tempfile::tempdir().unwrap();
+        state.scoped_states.write().await.insert(
+            (StateId::from("bad_glob"), cwd.path().to_path_buf()),
+            Arc::new(ScopedState {
+                subscribers: RwLock::new(HashSet::new()),
+                last_value: RwLock::new(None),
+            }),
+        );
         let affected = vec![cwd.path().join("test.txt")];
         evaluate_watch_tasks(&state, &config, Some(&affected)).await;
     }
@@ -605,7 +600,14 @@ mod tests {
             },
         );
 
-        let _cwd = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        state.scoped_states.write().await.insert(
+            (StateId::from("fail_cmd"), cwd.path().to_path_buf()),
+            Arc::new(ScopedState {
+                subscribers: RwLock::new(HashSet::new()),
+                last_value: RwLock::new(None),
+            }),
+        );
         evaluate_watch_tasks(&state, &config, None).await;
     }
 }

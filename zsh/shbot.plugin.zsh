@@ -16,6 +16,7 @@
 zmodload zsh/net/socket
 zmodload zsh/system
 zmodload zsh/datetime
+zmodload zsh/parameter 2>/dev/null
 autoload -Uz add-zsh-hook
 
 typeset -g SHBOT_FD=0
@@ -25,6 +26,8 @@ typeset -g SHBOT_REPO="${SHBOT_REPO:-ianloic/shbot}"
 typeset -gi SHBOT_LAST_DOWNLOAD_FAILURE=0
 typeset -ga SHBOT_SUPPORTED_PLATFORMS
 SHBOT_SUPPORTED_PLATFORMS=("linux-x86_64" "linux-aarch64")
+typeset -g _SHBOT_CACHED_UNAME_S=""
+typeset -g _SHBOT_CACHED_UNAME_M=""
 
 function _shbot_debug() {
 	if [[ -n "$SHBOT_DEBUG" ]]; then
@@ -33,8 +36,20 @@ function _shbot_debug() {
 }
 
 function _shbot_platform() {
-	local uname_s="${SHBOT_UNAME_S:-$(command uname -s 2>/dev/null)}"
-	local uname_m="${SHBOT_UNAME_M:-$(command uname -m 2>/dev/null)}"
+	local uname_s="$SHBOT_UNAME_S"
+	if [[ -z "$uname_s" ]]; then
+		if [[ -z "$_SHBOT_CACHED_UNAME_S" ]]; then
+			_SHBOT_CACHED_UNAME_S="$(command uname -s 2>/dev/null)"
+		fi
+		uname_s="$_SHBOT_CACHED_UNAME_S"
+	fi
+	local uname_m="$SHBOT_UNAME_M"
+	if [[ -z "$uname_m" ]]; then
+		if [[ -z "$_SHBOT_CACHED_UNAME_M" ]]; then
+			_SHBOT_CACHED_UNAME_M="$(command uname -m 2>/dev/null)"
+		fi
+		uname_m="$_SHBOT_CACHED_UNAME_M"
+	fi
 	uname_s="${uname_s:l}"
 	uname_m="${uname_m:l}"
 	if [[ "$uname_s" == "linux" && "$uname_m" == "arm64" ]]; then
@@ -262,8 +277,8 @@ function _shbot_resolve_bin() {
 		if [[ -x "$SHBOT_BIN" ]]; then
 			REPLY="$SHBOT_BIN"
 			return 0
-		elif command -v "$SHBOT_BIN" >/dev/null 2>&1; then
-			REPLY="$(command -v "$SHBOT_BIN")"
+		elif [[ -n "${commands[$SHBOT_BIN]:-}" ]]; then
+			REPLY="${commands[$SHBOT_BIN]}"
 			return 0
 		fi
 		_shbot_debug "Configured SHBOT_BIN is not executable: $SHBOT_BIN"
@@ -308,7 +323,8 @@ function shbot() {
 }
 
 function _shbot_update_vcs_status() {
-	_shbot_debug "Updating VCS status: $1"
+	setopt local_options sh_word_split no_glob
+	[[ -n "$SHBOT_DEBUG" ]] && _shbot_debug "Updating VCS status: $1"
 	local payload="$1"
 	if [[ -z "$payload" ]]; then
 		unset VCS_STATUS_{WORKDIR,COMMIT,LOCAL_BRANCH,REMOTE_BRANCH,REMOTE_NAME,REMOTE_URL,ACTION,INDEX_SIZE,NUM_STAGED,NUM_UNSTAGED,NUM_CONFLICTED,NUM_UNTRACKED,HAS_STAGED,HAS_UNSTAGED,HAS_CONFLICTED,HAS_UNTRACKED,COMMITS_AHEAD,COMMITS_BEHIND,STASHES,TAG,NUM_UNSTAGED_DELETED,NUM_STAGED_NEW,NUM_STAGED_DELETED,PUSH_REMOTE_NAME,PUSH_REMOTE_URL,PUSH_COMMITS_AHEAD,PUSH_COMMITS_BEHIND,NUM_SKIP_WORKTREE,NUM_ASSUME_UNCHANGED,COMMIT_ENCODING,COMMIT_SUMMARY}
@@ -316,17 +332,9 @@ function _shbot_update_vcs_status() {
 		return 0
 	fi
 
-	local sep=$'\x1f'
-	local -a resp
-	local rest="$payload"
-	while true; do
-		resp+=("${rest%%$sep*}")
-		if [[ "$rest" == *$sep* ]]; then
-			rest="${rest#*$sep}"
-		else
-			break
-		fi
-	done
+	local padded="${payload}"$'\x1f'
+	local IFS=$'\x1f'
+	local -a resp=($padded)
 
 	if [[ -z "${resp[1]}" ]]; then
 		unset VCS_STATUS_{WORKDIR,COMMIT,LOCAL_BRANCH,REMOTE_BRANCH,REMOTE_NAME,REMOTE_URL,ACTION,INDEX_SIZE,NUM_STAGED,NUM_UNSTAGED,NUM_CONFLICTED,NUM_UNTRACKED,HAS_STAGED,HAS_UNSTAGED,HAS_CONFLICTED,HAS_UNTRACKED,COMMITS_AHEAD,COMMITS_BEHIND,STASHES,TAG,NUM_UNSTAGED_DELETED,NUM_STAGED_NEW,NUM_STAGED_DELETED,PUSH_REMOTE_NAME,PUSH_REMOTE_URL,PUSH_COMMITS_AHEAD,PUSH_COMMITS_BEHIND,NUM_SKIP_WORKTREE,NUM_ASSUME_UNCHANGED,COMMIT_ENCODING,COMMIT_SUMMARY}
@@ -334,62 +342,63 @@ function _shbot_update_vcs_status() {
 		return 0
 	fi
 
-	typeset -g VCS_STATUS_WORKDIR="${resp[1]}"
-	typeset -g VCS_STATUS_COMMIT="${resp[2]}"
-	typeset -g VCS_STATUS_LOCAL_BRANCH="${resp[3]}"
-	typeset -g VCS_STATUS_REMOTE_BRANCH="${resp[4]}"
-	typeset -g VCS_STATUS_REMOTE_NAME="${resp[5]}"
-	typeset -g VCS_STATUS_REMOTE_URL="${resp[6]}"
-	typeset -g VCS_STATUS_ACTION="${resp[7]}"
-	typeset -g VCS_STATUS_INDEX_SIZE="${resp[8]}"
-	typeset -g VCS_STATUS_NUM_STAGED="${resp[9]}"
-	typeset -g VCS_STATUS_NUM_UNSTAGED="${resp[10]}"
-	typeset -g VCS_STATUS_NUM_CONFLICTED="${resp[11]}"
-	typeset -g VCS_STATUS_NUM_UNTRACKED="${resp[12]}"
-	typeset -g VCS_STATUS_COMMITS_AHEAD="${resp[13]}"
-	typeset -g VCS_STATUS_COMMITS_BEHIND="${resp[14]}"
-	typeset -g VCS_STATUS_STASHES="${resp[15]}"
-	typeset -g VCS_STATUS_TAG="${resp[16]}"
-	typeset -g VCS_STATUS_NUM_UNSTAGED_DELETED="${resp[17]}"
-	typeset -g VCS_STATUS_NUM_STAGED_NEW="${resp[18]}"
-	typeset -g VCS_STATUS_NUM_STAGED_DELETED="${resp[19]}"
-	typeset -g VCS_STATUS_PUSH_REMOTE_NAME="${resp[20]}"
-	typeset -g VCS_STATUS_PUSH_REMOTE_URL="${resp[21]}"
-	typeset -g VCS_STATUS_PUSH_COMMITS_AHEAD="${resp[22]}"
-	typeset -g VCS_STATUS_PUSH_COMMITS_BEHIND="${resp[23]}"
-	typeset -g VCS_STATUS_NUM_SKIP_WORKTREE="${resp[24]}"
-	typeset -g VCS_STATUS_NUM_ASSUME_UNCHANGED="${resp[25]}"
-	typeset -g VCS_STATUS_COMMIT_ENCODING="${resp[26]}"
-	typeset -g VCS_STATUS_COMMIT_SUMMARY="${resp[27]}"
+	typeset -g \
+		VCS_STATUS_WORKDIR="${resp[1]}" \
+		VCS_STATUS_COMMIT="${resp[2]}" \
+		VCS_STATUS_LOCAL_BRANCH="${resp[3]}" \
+		VCS_STATUS_REMOTE_BRANCH="${resp[4]}" \
+		VCS_STATUS_REMOTE_NAME="${resp[5]}" \
+		VCS_STATUS_REMOTE_URL="${resp[6]}" \
+		VCS_STATUS_ACTION="${resp[7]}" \
+		VCS_STATUS_TAG="${resp[16]}" \
+		VCS_STATUS_PUSH_REMOTE_NAME="${resp[20]}" \
+		VCS_STATUS_PUSH_REMOTE_URL="${resp[21]}" \
+		VCS_STATUS_COMMIT_ENCODING="${resp[26]}" \
+		VCS_STATUS_COMMIT_SUMMARY="${resp[27]}" \
+		VCS_STATUS_RESULT=ok-sync
 
-	typeset -gi VCS_STATUS_{INDEX_SIZE,NUM_STAGED,NUM_UNSTAGED,NUM_CONFLICTED,NUM_UNTRACKED,COMMITS_AHEAD,COMMITS_BEHIND,STASHES,NUM_UNSTAGED_DELETED,NUM_STAGED_NEW,NUM_STAGED_DELETED,PUSH_COMMITS_AHEAD,PUSH_COMMITS_BEHIND,NUM_SKIP_WORKTREE,NUM_ASSUME_UNCHANGED}
-	typeset -gi VCS_STATUS_HAS_STAGED=$((VCS_STATUS_NUM_STAGED > 0))
-	typeset -gi VCS_STATUS_HAS_UNSTAGED=$((VCS_STATUS_NUM_UNSTAGED > 0))
-	typeset -gi VCS_STATUS_HAS_CONFLICTED=$((VCS_STATUS_NUM_CONFLICTED > 0))
-	typeset -gi VCS_STATUS_HAS_UNTRACKED=$((VCS_STATUS_NUM_UNTRACKED > 0))
+	typeset -gi \
+		VCS_STATUS_INDEX_SIZE="${resp[8]}" \
+		VCS_STATUS_NUM_STAGED="${resp[9]}" \
+		VCS_STATUS_NUM_UNSTAGED="${resp[10]}" \
+		VCS_STATUS_NUM_CONFLICTED="${resp[11]}" \
+		VCS_STATUS_NUM_UNTRACKED="${resp[12]}" \
+		VCS_STATUS_COMMITS_AHEAD="${resp[13]}" \
+		VCS_STATUS_COMMITS_BEHIND="${resp[14]}" \
+		VCS_STATUS_STASHES="${resp[15]}" \
+		VCS_STATUS_NUM_UNSTAGED_DELETED="${resp[17]}" \
+		VCS_STATUS_NUM_STAGED_NEW="${resp[18]}" \
+		VCS_STATUS_NUM_STAGED_DELETED="${resp[19]}" \
+		VCS_STATUS_PUSH_COMMITS_AHEAD="${resp[22]}" \
+		VCS_STATUS_PUSH_COMMITS_BEHIND="${resp[23]}" \
+		VCS_STATUS_NUM_SKIP_WORKTREE="${resp[24]}" \
+		VCS_STATUS_NUM_ASSUME_UNCHANGED="${resp[25]}"
 
-	if [[ -n $VCS_STATUS_WORKDIR ]]; then
-		typeset -g VCS_STATUS_RESULT=ok-sync
-	else
-		typeset -g VCS_STATUS_RESULT=norepo-sync
-	fi
+	typeset -gi \
+		VCS_STATUS_HAS_STAGED=$((VCS_STATUS_NUM_STAGED > 0)) \
+		VCS_STATUS_HAS_UNSTAGED=$((VCS_STATUS_NUM_UNSTAGED > 0)) \
+		VCS_STATUS_HAS_CONFLICTED=$((VCS_STATUS_NUM_CONFLICTED > 0)) \
+		VCS_STATUS_HAS_UNTRACKED=$((VCS_STATUS_NUM_UNTRACKED > 0))
 }
 
 function _shbot_send() {
 	if [[ $SHBOT_FD -eq 0 ]]; then
-		_shbot_debug "Cannot send '$1': no active connection"
+		[[ -n "$SHBOT_DEBUG" ]] && _shbot_debug "Cannot send '$1': no active connection"
 		return 1
 	fi
 	if [[ "$1" == *$'\n'* || "$1" == *$'\r'* ]]; then
-		_shbot_debug "Refusing to send command containing a newline"
+		[[ -n "$SHBOT_DEBUG" ]] && _shbot_debug "Refusing to send command containing a newline"
 		return 1
 	fi
-	_shbot_debug "Sending command: $1"
-	syswrite -o $SHBOT_FD "$1"$'\n' || _shbot_debug "Write failed: $1"
+	[[ -n "$SHBOT_DEBUG" ]] && _shbot_debug "Sending command: $1"
+	if ! syswrite -o $SHBOT_FD "$1"$'\n'; then
+		[[ -n "$SHBOT_DEBUG" ]] && _shbot_debug "Write failed: $1"
+		return 1
+	fi
 }
 
 function _shbot_connect() {
-	local socket_path="${SHBOT_SOCKET:-$HOME/.local/state/shbot/$HOST.socket}"
+	local socket_path="${SHBOT_SOCKET:-${XDG_STATE_HOME:-$HOME/.local/state}/shbot/$HOST.socket}"
 	_shbot_debug "Connecting to socket: $socket_path"
 
 	if [[ $SHBOT_FD -ne 0 ]]; then
@@ -439,38 +448,49 @@ function _shbot_read_handler() {
 		return 1
 	fi
 
-	_shbot_debug "Read line: $line"
+	local updated=0
+	local marker=$'\x01' nl=$'\n' cr=$'\r' us=$'\x1f'
+	while true; do
+		[[ -n "$SHBOT_DEBUG" ]] && _shbot_debug "Read line: $line"
 
-	local msg_type="${line%% *}"
-	local rest="${line#* }"
+		local msg_type="${line%% *}"
+		local rest="${line#* }"
 
-	if [[ "$msg_type" == "update" ]]; then
-		local state_id="${rest%% *}"
-		local payload=""
-		if [[ "$rest" == *" "* ]]; then
-			payload="${rest#* }"
+		if [[ "$msg_type" == "update" ]]; then
+			local state_id="${rest%% *}"
+			local payload=""
+			if [[ "$rest" == *" "* ]]; then
+				payload="${rest#* }"
+			fi
+			if [[ "$payload" == *%* ]]; then
+				payload="${payload//'%25'/$marker}"
+				payload="${payload//'%0A'/$nl}"
+				payload="${payload//'%0D'/$cr}"
+				payload="${payload//'%1F'/$us}"
+				payload="${payload//'%00'/}"
+				payload="${payload//"$marker"/%}"
+				payload="${payload//'%01'/$marker}"
+			fi
+			SHBOT_STATE[$state_id]="$payload"
+			[[ -n "$SHBOT_DEBUG" ]] && _shbot_debug "Updated state: $state_id = $payload"
+
+			if [[ "$state_id" == "git" && -n "$SHBOT_SET_VCS_STATUS" ]]; then
+				_shbot_update_vcs_status "$payload"
+			fi
+
+			updated=1
 		fi
-		local marker=$'\x01' nl=$'\n' cr=$'\r' us=$'\x1f'
-		payload="${payload//'%25'/$marker}"
-		payload="${payload//'%0A'/$nl}"
-		payload="${payload//'%0D'/$cr}"
-		payload="${payload//'%1F'/$us}"
-		payload="${payload//'%00'/}"
-		payload="${payload//"$marker"/%}"
-		payload="${payload//'%01'/$marker}"
-		SHBOT_STATE[$state_id]="$payload"
-		_shbot_debug "Updated state: $state_id = $payload"
 
-		if [[ "$state_id" == "git" && -n "$SHBOT_SET_VCS_STATUS" ]]; then
-			_shbot_update_vcs_status "$payload"
-		fi
+		IFS= read -r -t 0 -u $fd line || break
+	done
 
+	if ((updated)); then
 		zle reset-prompt
 	fi
 }
 
 function _shbot_chpwd_hook() {
-	_shbot_debug "chpwd triggered ($PWD)"
+	[[ -n "$SHBOT_DEBUG" ]] && _shbot_debug "chpwd triggered ($PWD)"
 	_shbot_send "cd $PWD"
 }
 add-zsh-hook chpwd _shbot_chpwd_hook

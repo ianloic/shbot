@@ -4,3 +4,9 @@ members = [
     "daemon",
     "integration-tests"
 ]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

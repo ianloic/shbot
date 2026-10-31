@@ -13,19 +13,25 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use std::env::VarError;
+use std::error::Error as StdError;
 use std::fmt;
+use std::io::Error as IoError;
+use std::result::Result as StdResult;
+use toml::de::Error as TomlDeError;
+use tracing::subscriber::SetGlobalDefaultError;
 
 #[derive(Debug)]
 pub enum ShbotError {
-    Io(std::io::Error),
+    Io(IoError),
     Notify(notify::Error),
-    TomlSerDe(toml::de::Error),
-    EnvVar(std::env::VarError),
-    TracingSub(tracing::subscriber::SetGlobalDefaultError),
+    TomlSerDe(TomlDeError),
+    EnvVar(VarError),
+    TracingSub(SetGlobalDefaultError),
     Custom(String),
 }
 
-pub type Result<T> = std::result::Result<T, ShbotError>;
+pub type Result<T> = StdResult<T, ShbotError>;
 
 impl fmt::Display for ShbotError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -40,10 +46,10 @@ impl fmt::Display for ShbotError {
     }
 }
 
-impl std::error::Error for ShbotError {}
+impl StdError for ShbotError {}
 
-impl From<std::io::Error> for ShbotError {
-    fn from(err: std::io::Error) -> Self {
+impl From<IoError> for ShbotError {
+    fn from(err: IoError) -> Self {
         ShbotError::Io(err)
     }
 }
@@ -54,20 +60,20 @@ impl From<notify::Error> for ShbotError {
     }
 }
 
-impl From<toml::de::Error> for ShbotError {
-    fn from(err: toml::de::Error) -> Self {
+impl From<TomlDeError> for ShbotError {
+    fn from(err: TomlDeError) -> Self {
         ShbotError::TomlSerDe(err)
     }
 }
 
-impl From<std::env::VarError> for ShbotError {
-    fn from(err: std::env::VarError) -> Self {
+impl From<VarError> for ShbotError {
+    fn from(err: VarError) -> Self {
         ShbotError::EnvVar(err)
     }
 }
 
-impl From<tracing::subscriber::SetGlobalDefaultError> for ShbotError {
-    fn from(err: tracing::subscriber::SetGlobalDefaultError) -> Self {
+impl From<SetGlobalDefaultError> for ShbotError {
+    fn from(err: SetGlobalDefaultError) -> Self {
         ShbotError::TracingSub(err)
     }
 }
@@ -75,17 +81,19 @@ impl From<tracing::subscriber::SetGlobalDefaultError> for ShbotError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::ErrorKind;
+    use toml::Value;
 
     #[test]
     fn test_error_display() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let io_err = IoError::new(ErrorKind::NotFound, "file not found");
         let err = ShbotError::Io(io_err);
         assert_eq!(err.to_string(), "IO Error: file not found");
 
         let custom_err = ShbotError::Custom("custom error".to_string());
         assert_eq!(custom_err.to_string(), "custom error");
 
-        let env_err = std::env::VarError::NotPresent;
+        let env_err = VarError::NotPresent;
         let err2 = ShbotError::EnvVar(env_err);
         assert_eq!(
             err2.to_string(),
@@ -96,7 +104,7 @@ mod tests {
         let err3 = ShbotError::Notify(notify_err);
         assert_eq!(err3.to_string(), "Watcher Error: notify error");
 
-        let toml_err: toml::de::Error = toml::from_str::<toml::Value>("invalid toml").unwrap_err();
+        let toml_err: TomlDeError = toml::from_str::<Value>("invalid toml").unwrap_err();
         let err4 = ShbotError::TomlSerDe(toml_err);
         assert!(err4.to_string().starts_with("TOML parse error:"));
 
@@ -105,11 +113,11 @@ mod tests {
 
     #[test]
     fn test_error_from() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
+        let io_err = IoError::new(ErrorKind::NotFound, "not found");
         let err: ShbotError = io_err.into();
         assert!(matches!(err, ShbotError::Io(_)));
 
-        let env_err = std::env::VarError::NotPresent;
+        let env_err = VarError::NotPresent;
         let err2: ShbotError = env_err.into();
         assert!(matches!(err2, ShbotError::EnvVar(_)));
 
@@ -117,7 +125,7 @@ mod tests {
         let err4: ShbotError = notify_err.into();
         assert!(matches!(err4, ShbotError::Notify(_)));
 
-        let toml_err: toml::de::Error = toml::from_str::<toml::Value>("invalid toml").unwrap_err();
+        let toml_err: TomlDeError = toml::from_str::<Value>("invalid toml").unwrap_err();
         let err5: ShbotError = toml_err.into();
         assert!(matches!(err5, ShbotError::TomlSerDe(_)));
     }

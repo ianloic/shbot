@@ -203,20 +203,31 @@ mod tests {
             "",
             "",
             "",
-            "",
-            "",
             "0",
             "0",
+            "2",
+            "3",
             "",
             "subject%0Abody",
         ];
         assert_eq!(fields.len(), 27);
         let payload = fields.join("%1F");
-        stream.write_all(format!("update git {}\n", payload).as_bytes())?;
+        // Send a multi-line burst in a single write to verify _shbot_read_handler drains all available lines
+        stream.write_all(
+            format!(
+                "update burst_plain hello_world\nupdate burst_pct 100%25_done\nupdate git {}\n",
+                payload
+            )
+            .as_bytes(),
+        )?;
 
         env.wait_for_mut(5, |env| {
-            let out = env.send_line("print -r -- \"BR=${VCS_STATUS_LOCAL_BRANCH}\"")?;
-            Ok::<bool, Box<dyn std::error::Error>>(out.contains("BR=main"))
+            let out = env.send_line(
+                "print -r -- \"BR=${VCS_STATUS_LOCAL_BRANCH}|SW=${VCS_STATUS_NUM_SKIP_WORKTREE}|AU=${VCS_STATUS_NUM_ASSUME_UNCHANGED}|B1=${SHBOT_STATE[burst_plain]}|B2=${SHBOT_STATE[burst_pct]}\"",
+            )?;
+            Ok::<bool, Box<dyn Error>>(
+                out.contains("BR=main|SW=2|AU=3|B1=hello_world|B2=100%_done"),
+            )
         })?;
 
         // Field alignment must survive the many empty fields.
@@ -354,6 +365,24 @@ mod tests {
                 .to_string();
             Ok::<bool, Box<dyn std::error::Error>>(val == "1")
         })?;
+
+        // Verify end-to-end skip-worktree and assume-unchanged index flag reporting
+        env.send_line("touch skip.txt assume.txt && git add skip.txt assume.txt && git commit -m 'init'")?;
+        env.send_line("git update-index --skip-worktree skip.txt && git update-index --assume-unchanged assume.txt")?;
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line(
+                "print -r -- \"FLAGS=${VCS_STATUS_NUM_SKIP_WORKTREE}:${VCS_STATUS_NUM_ASSUME_UNCHANGED}\"",
+            )?;
+            Ok::<bool, Box<dyn Error>>(out.contains("FLAGS=1:1"))
+        })?;
+        let flags_out = env.send_line(
+            "print -r -- \"FLAGS=${VCS_STATUS_NUM_SKIP_WORKTREE}:${VCS_STATUS_NUM_ASSUME_UNCHANGED}\"",
+        )?;
+        assert!(
+            flags_out.contains("FLAGS=1:1"),
+            "Expected skip-worktree=1 and assume-unchanged=1, got: {}",
+            flags_out
+        );
 
         env.kill_daemon();
 

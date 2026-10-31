@@ -172,7 +172,7 @@ You can extract the string into a Zsh array in your prompt configuration scripts
 via parameter expansion:
 
 ```zsh
-local -a git_state=("${(@s.$'\x1f'.)SHBOT_STATE[git]}")
+local -a git_state=("${(@ps:\x1f:)SHBOT_STATE[git]}")
 
 # Example usages:
 local branch_name=$git_state[3]

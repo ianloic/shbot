@@ -16,10 +16,11 @@
 use crate::error::Result;
 use gix::bstr::{BString, ByteSlice};
 use gix::commit::describe::SelectRef;
+use gix::diff::Rewrites;
 use gix::diff::index::Change as TreeIndexChange;
 use gix::dir::entry::Status as DirEntryStatus;
 use gix::head::Kind as HeadKind;
-use gix::index::entry::Stage;
+use gix::index::entry::{Flags as EntryFlags, Stage};
 use gix::progress::Discard;
 use gix::refs::FullName;
 use gix::remote::Direction;
@@ -28,9 +29,16 @@ use gix::status::plumbing::index_as_worktree::{Change as WorktreeChange, EntrySt
 use gix::status::tree_index::TrackRenames;
 use gix::status::{Item as StatusItem, Submodule, UntrackedFiles};
 use gix::{ObjectId, Repository};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
+use std::sync::{LazyLock, Mutex};
+use tracing::debug;
+
+const MAX_AHEAD_BEHIND_CACHE_ENTRIES: usize = 256;
+const ODB_OBJECT_CACHE_BYTES: usize = 4 * 1024 * 1024;
+
+static AHEAD_BEHIND_CACHE: LazyLock<Mutex<HashMap<(ObjectId, ObjectId), (usize, usize)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct GitState {
@@ -106,6 +114,11 @@ fn ahead_behind(
     if local_id == upstream_id {
         return Some((0, 0));
     }
+    if let Ok(cache) = AHEAD_BEHIND_CACHE.lock()
+        && let Some(&cached) = cache.get(&(local_id, upstream_id))
+    {
+        return Some(cached);
+    }
     let ahead = repo
         .rev_walk([local_id])
         .with_hidden([upstream_id])
@@ -120,16 +133,24 @@ fn ahead_behind(
         .ok()?
         .flatten()
         .count();
+    if let Ok(mut cache) = AHEAD_BEHIND_CACHE.lock() {
+        if cache.len() >= MAX_AHEAD_BEHIND_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert((local_id, upstream_id), (ahead, behind));
+    }
     Some((ahead, behind))
 }
 
 pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
     debug!("Evaluating git state for path: {:?}", path);
-    // Discover repository. It traverses upwards automatically.
-    let repo = match gix::discover(path) {
+    // Try opening the repository directly first (fast path when `path` is already
+    // the scope root), falling back to upward discovery for subdirectories.
+    let mut repo = match gix::open(path).or_else(|_| gix::discover(path)) {
         Ok(r) => r,
         Err(_) => return Ok(None),
     };
+    repo.object_cache_size_if_unset(ODB_OBJECT_CACHE_BYTES);
 
     let Some(workdir) = repo.workdir() else {
         return Ok(None); // Bare repo
@@ -192,6 +213,7 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
     }
 
     // Calculate ahead/behind if there is an upstream
+    let mut fetch_upstream_oid: Option<ObjectId> = None;
     if let Some(ref full_name) = head_ref_name
         && let Some(local_oid) = head_commit_id
         && let Some(Ok(tracking_ref_name)) =
@@ -201,10 +223,12 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
 
         if let Ok(mut upstream_ref) = repo.find_reference(local_str.as_str())
             && let Ok(upstream_commit) = upstream_ref.peel_to_commit()
-            && let Some((ahead, behind)) = ahead_behind(&repo, local_oid, upstream_commit.id)
         {
-            state.commits_ahead = ahead;
-            state.commits_behind = behind;
+            fetch_upstream_oid = Some(upstream_commit.id);
+            if let Some((ahead, behind)) = ahead_behind(&repo, local_oid, upstream_commit.id) {
+                state.commits_ahead = ahead;
+                state.commits_behind = behind;
+            }
         }
 
         let short_branch = full_name.shorten();
@@ -241,13 +265,21 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
         state.action = "bisect".to_string();
     }
 
-    // Index size & conflicted entries
+    // Index size, conflicted entries, skip-worktree & assume-unchanged flags.
+    // Using `index_or_empty()` populates `repo`'s internal index cache so the
+    // subsequent `repo.status()` call reuses the parsed index in memory.
     let mut conflicted_paths: HashSet<BString> = HashSet::new();
-    if let Ok(index) = repo.open_index() {
+    if let Ok(index) = repo.index_or_empty() {
         state.index_size = index.entries().len();
         for entry in index.entries() {
             if entry.flags.stage() != Stage::Unconflicted {
                 conflicted_paths.insert(entry.path(&index).to_owned());
+            }
+            if entry.flags.contains(EntryFlags::SKIP_WORKTREE) {
+                state.num_skip_worktree += 1;
+            }
+            if entry.flags.contains(EntryFlags::ASSUME_VALID) {
+                state.num_assume_unchanged += 1;
             }
         }
     }
@@ -255,13 +287,16 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
 
     // Determine statuses
     let workdir = repo.workdir().unwrap_or(repo.git_dir());
-    info!("Starting gix status crawl for {:?}", workdir);
+    debug!("Starting gix status crawl for {:?}", workdir);
 
     if let Ok(platform) = repo.status(Discard) {
         let platform = platform
             .untracked_files(UntrackedFiles::Collapsed)
             .index_worktree_submodules(Submodule::AsConfigured { check_dirty: true })
-            .tree_index_track_renames(TrackRenames::Given(Default::default()));
+            .tree_index_track_renames(TrackRenames::Given(Rewrites {
+                percentage: None,
+                ..Default::default()
+            }));
 
         if let Ok(iter) = platform.into_iter(Vec::<BString>::new()) {
             for item in iter.flatten() {
@@ -328,7 +363,7 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
         }
     }
 
-    info!("Finished gix status crawl for {:?}", workdir);
+    debug!("Finished gix status crawl for {:?}", workdir);
 
     // Stashes
     if let Ok(stash_ref) = repo.find_reference("refs/stash")
@@ -369,10 +404,16 @@ pub fn get_git_state(path: &Path) -> Result<Option<(PathBuf, GitState)>> {
             if let Some(local_oid) = head_commit_id
                 && let Ok(mut upstream_ref) = repo.find_reference(&push_ref)
                 && let Ok(upstream_commit) = upstream_ref.peel_to_commit()
-                && let Some((ahead, behind)) = ahead_behind(&repo, local_oid, upstream_commit.id)
             {
-                state.push_commits_ahead = ahead;
-                state.push_commits_behind = behind;
+                if fetch_upstream_oid == Some(upstream_commit.id) {
+                    state.push_commits_ahead = state.commits_ahead;
+                    state.push_commits_behind = state.commits_behind;
+                } else if let Some((ahead, behind)) =
+                    ahead_behind(&repo, local_oid, upstream_commit.id)
+                {
+                    state.push_commits_ahead = ahead;
+                    state.push_commits_behind = behind;
+                }
             }
         }
     }
@@ -1172,5 +1213,28 @@ mod tests {
         assert_eq!(state.num_staged_new, 0);
         assert_eq!(state.num_staged_deleted, 0);
         assert_eq!(state.num_unstaged, 0);
+    }
+
+    #[test]
+    fn test_git_skip_worktree_and_assume_unchanged() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init", "--initial-branch=main"], root);
+        run_git(&["config", "user.name", "Test User"], root);
+        run_git(&["config", "user.email", "test@example.com"], root);
+
+        fs::write(root.join("skip.txt"), "skip").unwrap();
+        fs::write(root.join("assume.txt"), "assume").unwrap();
+        fs::write(root.join("normal.txt"), "normal").unwrap();
+        run_git(&["add", "skip.txt", "assume.txt", "normal.txt"], root);
+        run_git(&["commit", "-m", "initial"], root);
+
+        run_git(&["update-index", "--skip-worktree", "skip.txt"], root);
+        run_git(&["update-index", "--assume-unchanged", "assume.txt"], root);
+
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.index_size, 3);
+        assert_eq!(state.num_skip_worktree, 1);
+        assert_eq!(state.num_assume_unchanged, 1);
     }
 }

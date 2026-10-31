@@ -14,7 +14,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::config::{Config, StateId};
-use crate::protocol::encode_payload;
+use crate::protocol::format_update_message;
 use crate::runner::evaluate_scoped_state;
 use crate::watcher::SyncWatcher;
 use std::collections::{HashMap, HashSet};
@@ -22,7 +22,13 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+#[cfg(test)]
+use tokio::sync::broadcast;
 use tokio::sync::{RwLock, mpsc};
+use tracing::debug;
+#[cfg(test)]
+use tracing::info;
 
 pub type Pid = u32;
 
@@ -44,9 +50,9 @@ pub struct DaemonState {
     pub git_latencies: RwLock<HashMap<PathBuf, u64>>,
     pub last_trigger_refresh_micros: AtomicU64,
     pub scoped_states: RwLock<HashMap<(StateId, PathBuf), Arc<ScopedState>>>,
-    pub in_flight: RwLock<HashSet<(StateId, PathBuf)>>,
+    pub in_flight: RwLock<HashMap<(StateId, PathBuf), bool>>,
     #[cfg(test)]
-    pub test_events_tx: tokio::sync::broadcast::Sender<()>,
+    pub test_events_tx: broadcast::Sender<()>,
 }
 
 impl DaemonState {
@@ -56,17 +62,38 @@ impl DaemonState {
             git_latencies: RwLock::new(HashMap::new()),
             last_trigger_refresh_micros: AtomicU64::new(0),
             scoped_states: RwLock::new(HashMap::new()),
-            in_flight: RwLock::new(HashSet::new()),
+            in_flight: RwLock::new(HashMap::new()),
             #[cfg(test)]
-            test_events_tx: tokio::sync::broadcast::channel(100).0,
+            test_events_tx: broadcast::channel(100).0,
         })
     }
 
     pub async fn begin_evaluation(&self, name: &StateId, root: &Path) -> bool {
         let mut in_flight = self.in_flight.write().await;
-        in_flight.insert((name.clone(), root.to_path_buf()))
+        let key = (name.clone(), root.to_path_buf());
+        if let Some(rerun_pending) = in_flight.get_mut(&key) {
+            *rerun_pending = true;
+            false
+        } else {
+            in_flight.insert(key, false);
+            true
+        }
     }
 
+    pub async fn finish_evaluation_step(&self, name: &StateId, root: &Path) -> bool {
+        let mut in_flight = self.in_flight.write().await;
+        let key = (name.clone(), root.to_path_buf());
+        if let Some(rerun_pending) = in_flight.get_mut(&key) {
+            if *rerun_pending {
+                *rerun_pending = false;
+                return true;
+            }
+            in_flight.remove(&key);
+        }
+        false
+    }
+
+    #[cfg(test)]
     pub async fn end_evaluation(&self, name: &StateId, root: &Path) {
         self.in_flight
             .write()
@@ -86,7 +113,7 @@ impl DaemonState {
         );
         #[cfg(test)]
         {
-            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
+            info!("TEST EVENT SENT from broadcast_to_cwd");
             let _ = self.test_events_tx.send(());
         }
     }
@@ -96,7 +123,7 @@ impl DaemonState {
         clients.remove(&pid);
         #[cfg(test)]
         {
-            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
+            info!("TEST EVENT SENT from broadcast_to_cwd");
             let _ = self.test_events_tx.send(());
         }
     }
@@ -108,7 +135,7 @@ impl DaemonState {
         }
         #[cfg(test)]
         {
-            tracing::info!("TEST EVENT SENT from broadcast_to_cwd");
+            info!("TEST EVENT SENT from broadcast_to_cwd");
             let _ = self.test_events_tx.send(());
         }
     }
@@ -118,11 +145,7 @@ impl DaemonState {
         self.clients.read().await.get(&pid).map(|c| c.cwd.clone())
     }
 
-    pub async fn get_status_dump(
-        &self,
-        num_monitors: usize,
-        config: &crate::config::Config,
-    ) -> String {
+    pub async fn get_status_dump(&self, num_monitors: usize, config: &Config) -> String {
         let clients = self.clients.read().await;
         let mut dump = "shbot daemon status:\n".to_string();
         let git_hash = option_env!("SHBOT_GIT_HASH").unwrap_or("unknown");
@@ -215,7 +238,7 @@ impl DaemonState {
         }
         #[cfg(test)]
         {
-            tracing::info!("TEST EVENT SENT from invalidate");
+            info!("TEST EVENT SENT from invalidate");
             let _ = self.test_events_tx.send(());
         }
     }
@@ -227,6 +250,7 @@ impl DaemonState {
         watcher: Arc<SyncWatcher>,
         config: &Config,
     ) {
+        debug!("Handling cd to {:?} for PID {}", path, pid);
         self.update_cwd(pid, path.clone()).await;
 
         let mut new_scopes = HashSet::new();
@@ -256,6 +280,7 @@ impl DaemonState {
 
         let mut newly_created_scopes = Vec::new();
         let mut initial_payloads = Vec::new();
+        let mut targets_to_unwatch = Vec::new();
 
         {
             let mut scoped_states = self.scoped_states.write().await;
@@ -286,39 +311,39 @@ impl DaemonState {
                 }
                 if is_orphaned {
                     scoped_states.remove(&key);
-                    // Also unwatch
-                    if let Some(state_config) = config.state.get(&key.0) {
-                        if state_config.invalidate.watch.is_some()
-                            || state_config.invalidate.pwd.unwrap_or(false)
-                        {
-                            // Check if any OTHER active state is using this target before unwatching
-                            let target = &key.1;
-                            let mut keep = false;
-                            for (other_key, _) in scoped_states.iter() {
-                                if other_key.1 == *target {
-                                    if let Some(sc) = config.state.get(&other_key.0) {
-                                        if sc.invalidate.watch.is_some()
-                                            || sc.invalidate.pwd.unwrap_or(false)
-                                        {
-                                            keep = true;
-                                            break;
-                                        }
-                                    }
-                                }
+                    if let Some(state_config) = config.state.get(&key.0)
+                        && (state_config.invalidate.watch.is_some()
+                            || state_config.invalidate.pwd.unwrap_or(false))
+                    {
+                        // Check if any OTHER active state is using this target before unwatching
+                        let target = &key.1;
+                        let mut keep = false;
+                        for (other_key, _) in scoped_states.iter() {
+                            if other_key.1 == *target
+                                && let Some(sc) = config.state.get(&other_key.0)
+                                && (sc.invalidate.watch.is_some()
+                                    || sc.invalidate.pwd.unwrap_or(false))
+                            {
+                                keep = true;
+                                break;
                             }
-                            if !keep {
-                                let watcher_clone = watcher.clone();
-                                let target_clone = key.1.clone();
-                                let _ = tokio::task::spawn_blocking(move || {
-                                    watcher_clone.unwatch(&target_clone);
-                                })
-                                .await;
-                                self.git_latencies.write().await.remove(&key.1);
-                            }
+                        }
+                        if !keep {
+                            targets_to_unwatch.push(key.1);
                         }
                     }
                 }
             }
+        }
+
+        for target in targets_to_unwatch {
+            let watcher_clone = watcher.clone();
+            let target_clone = target.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                watcher_clone.unwatch(&target_clone);
+            })
+            .await;
+            self.git_latencies.write().await.remove(&target);
         }
 
         // Clear any states that are no longer in scope and send any cached payloads
@@ -331,9 +356,11 @@ impl DaemonState {
                     let _ = client.sender.try_send(msg);
                 }
                 for (name, payload) in initial_payloads {
-                    let msg = format!("update {} {}\n", name, encode_payload(&payload));
-                    client.last_state.insert(name, payload);
-                    let _ = client.sender.try_send(msg);
+                    if client.last_state.get(&name).map(String::as_str) != Some(payload.as_str()) {
+                        let msg = format_update_message(&name.0, &payload);
+                        client.last_state.insert(name, payload);
+                        let _ = client.sender.try_send(msg);
+                    }
                 }
             }
         }
@@ -354,11 +381,11 @@ impl DaemonState {
                 }
 
                 // Trigger initial evaluation
-                let start_trigger = std::time::Instant::now();
+                let start_trigger = Instant::now();
                 evaluate_scoped_state(&key.0, &key.1, self, config).await;
                 self.last_trigger_refresh_micros.store(
                     start_trigger.elapsed().as_micros() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
+                    Ordering::Relaxed,
                 );
             }
         }
@@ -381,48 +408,52 @@ impl DaemonState {
             }
         }
 
-        let mut scoped_states = self.scoped_states.write().await;
-        for key in old_scopes {
-            let mut is_orphaned = false;
-            if let Some(state) = scoped_states.get(&key) {
-                let mut subs = state.subscribers.write().await;
-                subs.remove(&pid);
-                if subs.is_empty() {
-                    is_orphaned = true;
+        let mut targets_to_unwatch = Vec::new();
+        {
+            let mut scoped_states = self.scoped_states.write().await;
+            for key in old_scopes {
+                let mut is_orphaned = false;
+                if let Some(state) = scoped_states.get(&key) {
+                    let mut subs = state.subscribers.write().await;
+                    subs.remove(&pid);
+                    if subs.is_empty() {
+                        is_orphaned = true;
+                    }
                 }
-            }
-            if is_orphaned {
-                scoped_states.remove(&key);
-                if let Some(state_config) = config.state.get(&key.0) {
-                    if state_config.invalidate.watch.is_some()
-                        || state_config.invalidate.pwd.unwrap_or(false)
+                if is_orphaned {
+                    scoped_states.remove(&key);
+                    if let Some(state_config) = config.state.get(&key.0)
+                        && (state_config.invalidate.watch.is_some()
+                            || state_config.invalidate.pwd.unwrap_or(false))
                     {
                         let target = &key.1;
                         let mut keep = false;
                         for (other_key, _) in scoped_states.iter() {
-                            if other_key.1 == *target {
-                                if let Some(sc) = config.state.get(&other_key.0) {
-                                    if sc.invalidate.watch.is_some()
-                                        || sc.invalidate.pwd.unwrap_or(false)
-                                    {
-                                        keep = true;
-                                        break;
-                                    }
-                                }
+                            if other_key.1 == *target
+                                && let Some(sc) = config.state.get(&other_key.0)
+                                && (sc.invalidate.watch.is_some()
+                                    || sc.invalidate.pwd.unwrap_or(false))
+                            {
+                                keep = true;
+                                break;
                             }
                         }
                         if !keep {
-                            let watcher_clone = watcher.clone();
-                            let target_clone = key.1.clone();
-                            let _ = tokio::task::spawn_blocking(move || {
-                                watcher_clone.unwatch(&target_clone);
-                            })
-                            .await;
-                            self.git_latencies.write().await.remove(&key.1);
+                            targets_to_unwatch.push(key.1);
                         }
                     }
                 }
             }
+        }
+
+        for target in targets_to_unwatch {
+            let watcher_clone = watcher.clone();
+            let target_clone = target.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                watcher_clone.unwatch(&target_clone);
+            })
+            .await;
+            self.git_latencies.write().await.remove(&target);
         }
     }
 
@@ -441,10 +472,12 @@ impl DaemonState {
             }
         };
 
-        let msg = format!("update {} {}\n", name, encode_payload(payload));
+        let msg = format_update_message(&name.0, payload);
         let mut clients = self.clients.write().await;
         for pid in clients_to_notify {
-            if let Some(client) = clients.get_mut(&pid) {
+            if let Some(client) = clients.get_mut(&pid)
+                && client.last_state.get(name).map(String::as_str) != Some(payload)
+            {
                 client.last_state.insert(name.clone(), payload.to_string());
                 let _ = client.sender.try_send(msg.clone());
             }
@@ -505,15 +538,15 @@ mod tests {
         state.scoped_states.write().await.insert(
             (StateId::git(), path.clone()),
             Arc::new(ScopedState {
-                subscribers: tokio::sync::RwLock::new([1].into()),
-                last_value: tokio::sync::RwLock::new(None),
+                subscribers: RwLock::new([1].into()),
+                last_value: RwLock::new(None),
             }),
         );
         state.scoped_states.write().await.insert(
             (StateId::from("other"), path.clone()),
             Arc::new(ScopedState {
-                subscribers: tokio::sync::RwLock::new([1].into()),
-                last_value: tokio::sync::RwLock::new(None),
+                subscribers: RwLock::new([1].into()),
+                last_value: RwLock::new(None),
             }),
         );
 

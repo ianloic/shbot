@@ -14,9 +14,17 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::error::Result;
+use crate::scope::Scope;
+use globset::{Glob, GlobBuilder, GlobMatcher, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
+use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::env;
+use std::fmt;
+use std::fs;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+use tracing::error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
 #[serde(transparent)]
@@ -28,8 +36,8 @@ impl StateId {
     }
 }
 
-impl std::fmt::Display for StateId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for StateId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
@@ -46,7 +54,7 @@ impl From<String> for StateId {
     }
 }
 
-impl std::borrow::Borrow<str> for StateId {
+impl Borrow<str> for StateId {
     fn borrow(&self) -> &str {
         &self.0
     }
@@ -98,11 +106,56 @@ fn default_command_timeout() -> u64 {
 #[allow(dead_code)]
 pub struct StateConfig {
     #[serde(default)]
-    pub scope: crate::scope::Scope,
+    pub scope: Scope,
     #[serde(flatten)]
     pub source: StateSource,
     #[serde(flatten)]
     pub invalidate: StateInvalidate,
+}
+
+impl StateConfig {
+    pub fn watch_pattern(&self) -> Option<&str> {
+        if let Some(w) = &self.invalidate.watch {
+            Some(w.as_str())
+        } else if let StateSource::File { file } = &self.source {
+            Some(file.as_str())
+        } else {
+            None
+        }
+    }
+
+    pub fn watch_matcher(&self, name: &StateId) -> Option<&GlobMatcher> {
+        let pattern = self.watch_pattern()?;
+        self.invalidate
+            .compiled_watch
+            .get_or_init(|| match GlobBuilder::new(pattern).build() {
+                Ok(g) => Some(g.compile_matcher()),
+                Err(e) => {
+                    error!(
+                        "Invalid glob pattern '{}' for state '{}': {}",
+                        pattern, name, e
+                    );
+                    None
+                }
+            })
+            .as_ref()
+    }
+
+    pub fn ignore_set(&self) -> Option<&GlobSet> {
+        self.invalidate
+            .compiled_ignore
+            .get_or_init(|| {
+                let ignore_patterns = self.invalidate.ignore.as_ref()?;
+                let mut builder = GlobSetBuilder::new();
+                for pattern in ignore_patterns {
+                    if let Ok(g) = Glob::new(pattern) {
+                        builder.add(g);
+                    }
+                }
+                builder.build().ok()
+            })
+            .as_ref()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -126,11 +179,15 @@ pub struct StateInvalidate {
     pub command: Option<String>,
     #[serde(default)]
     pub pwd: Option<bool>,
+    #[serde(skip)]
+    pub compiled_watch: OnceLock<Option<GlobMatcher>>,
+    #[serde(skip)]
+    pub compiled_ignore: OnceLock<Option<GlobSet>>,
 }
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let home = std::env::var("HOME")?;
+        let home = env::var("HOME")?;
         let config_path = PathBuf::from(home)
             .join(".config")
             .join("shbot")
@@ -139,7 +196,7 @@ impl Config {
         let mut config: Config = if !config_path.exists() {
             Self::default()
         } else {
-            let content = std::fs::read_to_string(&config_path)?;
+            let content = fs::read_to_string(&config_path)?;
             toml::from_str(&content)?
         };
         config.inject_implicit_states();
@@ -151,7 +208,7 @@ impl Config {
             self.state.insert(
                 StateId::git(),
                 StateConfig {
-                    scope: crate::scope::Scope::Nearest(vec![".git".to_string()]),
+                    scope: Scope::Nearest(vec![".git".to_string()]),
                     source: StateSource::Native {
                         native: "git".to_string(),
                     },
@@ -165,12 +222,18 @@ impl Config {
                             "**/.npm/**".to_string(),
                             "**/.nvm/**".to_string(),
                             "**/.git/objects/**".to_string(),
+                            "**/.git/*.lock".to_string(),
+                            "**/.git/refs/**/*.lock".to_string(),
                         ]),
                         pwd: Some(true),
                         ..Default::default()
                     },
                 },
             );
+        }
+        for (name, state_config) in &self.state {
+            let _ = state_config.watch_matcher(name);
+            let _ = state_config.ignore_set();
         }
     }
 }

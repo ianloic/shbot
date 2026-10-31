@@ -16,7 +16,7 @@ required to make `shbot` production-ready.
       (git remote URLs, commit summaries, task output) cannot forge protocol
       lines in the shell; decode symmetrically in the Zsh plugin.
 - [x] **Remove `eval` from the plugin**: Replace the eval-based VCS field split
-      with a literal string-splitting loop.
+      with `IFS=$'\x1f'` word splitting (`sh_word_split` + `no_glob`).
 - [x] **Reject newline injection from the shell**: `_shbot_send` refuses
       commands containing raw newlines (e.g. from a `$PWD` with an embedded
       newline).
@@ -49,6 +49,21 @@ required to make `shbot` production-ready.
 - [x] **Migrate Tooling to `mise`**: Replace manual script downloads with a
       `mise.toml` definition, implementing `fmt` and `coverage` as native `mise`
       tasks for better environment reproducibility.
+- [x] **Hot-Path & Architectural Optimizations**:
+  - [x] Reuse loaded `.git/index` across index inspection and `gix::status`,
+        enable `gix` parallel status and 4 MiB ODB cache, use exact-OID rename
+        tracking, populate `num_skip_worktree` / `num_assume_unchanged`, and
+        cache ahead/behind commit graph walks.
+  - [x] Pre-compile `watch` and `ignore` globs (`OnceLock`) on `StateInvalidate`
+        and filter `.git/objects/**` and `.git/**/*.lock` events inside the
+        `notify` callback before entering the bounded channel.
+  - [x] Upgrade `in_flight` to a dirty-latch map so file changes arriving during
+        an active evaluation trigger a trailing re-evaluation instead of being
+        dropped.
+  - [x] Optimize `_shbot_update_vcs_status` and `_shbot_read_handler` in Zsh
+        using `IFS=$'\x1f'` single-pass splitting, batched `typeset`
+        assignments, `%`-guarded decoding, and multi-line socket draining with a
+        single `zle reset-prompt`.
 
 ## Test Coverage Gaps
 

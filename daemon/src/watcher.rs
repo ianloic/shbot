@@ -15,17 +15,18 @@
 
 use crate::config::Config;
 use crate::error::Result;
-
 use crate::runner::evaluate_watch_tasks;
 use crate::state::DaemonState;
-use notify::{Config as NotifyConfig, Event, RecommendedWatcher, Watcher};
+use notify::{
+    Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{Duration, sleep};
-
-use std::sync::Mutex as StdMutex;
 use tracing::{debug, info, warn};
 
 const MAX_WATCHED_PATHS: usize = 256;
@@ -42,6 +43,27 @@ fn is_watchable_root(path: &Path) -> bool {
         .any(|root| path.starts_with(root))
 }
 
+fn is_noisy_git_internal_path(path: &Path) -> bool {
+    let mut saw_git = false;
+    for comp in path.components() {
+        if let Component::Normal(os) = comp {
+            if saw_git && os == "objects" {
+                return true;
+            }
+            if os == ".git" {
+                saw_git = true;
+            }
+        }
+    }
+    if saw_git
+        && let Some(ext) = path.extension()
+        && ext == "lock"
+    {
+        return true;
+    }
+    false
+}
+
 pub struct SyncWatcher {
     watcher: StdMutex<Option<RecommendedWatcher>>,
     watched_paths: StdMutex<HashSet<PathBuf>>,
@@ -55,22 +77,21 @@ impl SyncWatcher {
         })
     }
 
-    pub fn start(
-        &self,
-        state: Arc<DaemonState>,
-        config_rx: tokio::sync::watch::Receiver<Config>,
-    ) -> Result<()> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<PathBuf>(EVENT_CHANNEL_CAPACITY);
+    pub fn start(&self, state: Arc<DaemonState>, config_rx: watch::Receiver<Config>) -> Result<()> {
+        let (tx, mut rx) = mpsc::channel::<PathBuf>(EVENT_CHANNEL_CAPACITY);
 
         let watcher = RecommendedWatcher::new(
             move |res: notify::Result<Event>| {
                 if let Ok(event) = res {
                     // Ignore file read access to prevent infinite loops where
                     // reading the git status triggers a notify event.
-                    if matches!(event.kind, notify::EventKind::Access(_)) {
+                    if matches!(event.kind, EventKind::Access(_)) {
                         return;
                     }
                     for path in event.paths {
+                        if is_noisy_git_internal_path(&path) {
+                            continue;
+                        }
                         // Drop events when the queue is full rather than
                         // growing without bound during event storms.
                         if tx.try_send(path).is_err() {
@@ -103,7 +124,7 @@ impl SyncWatcher {
                 }
 
                 let sample_paths: Vec<_> = to_process.iter().take(5).collect();
-                tracing::debug!(
+                debug!(
                     "Watcher awoken, processing {} file events. Sample paths: {:?}",
                     to_process.len(),
                     sample_paths
@@ -113,11 +134,11 @@ impl SyncWatcher {
                 let affected_paths: Vec<PathBuf> = to_process.into_iter().collect();
 
                 if !affected_paths.is_empty() {
-                    let start_trigger = std::time::Instant::now();
+                    let start_trigger = Instant::now();
                     evaluate_watch_tasks(&state, &config, Some(&affected_paths)).await;
                     state.last_trigger_refresh_micros.store(
                         start_trigger.elapsed().as_micros() as u64,
-                        std::sync::atomic::Ordering::Relaxed,
+                        Ordering::Relaxed,
                     );
                 }
             }
@@ -154,7 +175,7 @@ impl SyncWatcher {
         }
 
         if let Some(w) = self.watcher.lock().unwrap().as_mut() {
-            if let Err(e) = w.watch(path, notify::RecursiveMode::Recursive) {
+            if let Err(e) = w.watch(path, RecursiveMode::Recursive) {
                 warn!("Failed to watch {:?}: {}", path, e);
             } else {
                 paths.insert(path.to_path_buf());
@@ -194,7 +215,6 @@ impl SyncWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_sync_watcher_watch_unwatch() {
@@ -213,14 +233,28 @@ mod tests {
         // in uninitialized states is critical for race condition safety!
     }
 
+    #[test]
+    fn test_noisy_git_internal_path_filter() {
+        assert!(is_noisy_git_internal_path(Path::new(
+            "/repo/.git/objects/ab/cd1234"
+        )));
+        assert!(is_noisy_git_internal_path(Path::new(
+            "/repo/.git/index.lock"
+        )));
+        assert!(is_noisy_git_internal_path(Path::new(
+            "/repo/.git/refs/heads/main.lock"
+        )));
+        assert!(!is_noisy_git_internal_path(Path::new("/repo/.git/index")));
+        assert!(!is_noisy_git_internal_path(Path::new("/repo/.git/HEAD")));
+        assert!(!is_noisy_git_internal_path(Path::new("/repo/src/main.rs")));
+        assert!(!is_noisy_git_internal_path(Path::new("/repo/Cargo.lock")));
+    }
+
     #[tokio::test]
     async fn test_unwatch_never_watched() {
-        use crate::config::Config;
-        use crate::state::DaemonState;
-
         let watcher = SyncWatcher::new();
         let state = DaemonState::new();
-        let (_config_tx, config_rx) = tokio::sync::watch::channel(Config::default());
+        let (_config_tx, config_rx) = watch::channel(Config::default());
 
         watcher.start(state, config_rx).unwrap();
 
@@ -233,12 +267,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_watcher_channel_disconnect() {
-        use crate::config::Config;
-        use crate::state::DaemonState;
-
         let watcher = SyncWatcher::new();
         let state = DaemonState::new();
-        let (_config_tx, config_rx) = tokio::sync::watch::channel(Config::default());
+        let (_config_tx, config_rx) = watch::channel(Config::default());
 
         watcher.start(state, config_rx).unwrap();
 
@@ -258,12 +289,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_watcher_refuses_sensitive_roots() {
-        use crate::config::Config;
-        use crate::state::DaemonState;
-
         let watcher = SyncWatcher::new();
         let state = DaemonState::new();
-        let (_config_tx, config_rx) = tokio::sync::watch::channel(Config::default());
+        let (_config_tx, config_rx) = watch::channel(Config::default());
 
         watcher.start(state, config_rx).unwrap();
 
@@ -276,7 +304,7 @@ mod tests {
             "/dev/null",
             "/run",
         ] {
-            watcher.watch(std::path::Path::new(root), &[]);
+            watcher.watch(Path::new(root), &[]);
         }
 
         assert_eq!(watcher.get_watch_count(), 0);
@@ -284,12 +312,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_watcher_watch_limit() {
-        use crate::config::Config;
-        use crate::state::DaemonState;
-
         let watcher = SyncWatcher::new();
         let state = DaemonState::new();
-        let (_config_tx, config_rx) = tokio::sync::watch::channel(Config::default());
+        let (_config_tx, config_rx) = watch::channel(Config::default());
 
         watcher.start(state, config_rx).unwrap();
 

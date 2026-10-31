@@ -21,27 +21,33 @@ and broadcasting state updates back to specific shells.
   initially bootstrap), `status` (for troubleshooting), `reload` (for dynamic
   config reload) and `loglevel` (for dynamic log filtering).
 - **`server.rs`:** Manages the UNIX socket listener
-  (`~/.local/state/shbot/<HOST>.socket`). Every accepted connection is
-  authenticated with kernel peer credentials (`SO_PEERCRED`): connections from a
-  different uid are rejected, and a client's `hello <pid>` registration is only
-  accepted when it matches the kernel-provided pid, preventing PID-spoofing and
-  client hijacking. The socket file is created with mode `0600` and the state
-  directory with `0700`, independent of the process umask. The server enforces
-  hard resource limits: a 64 KiB cap per protocol line, at most 128 concurrent
-  connections, and an idle timeout (`daemon.idle_timeout_sec`) that disconnects
-  connections with no client commands or server pushes within the configured
-  window. A second daemon instance refuses to bind over a live socket instead of
-  unlinking it.
+  (`${SHBOT_SOCKET:-${XDG_STATE_HOME:-$HOME/.local/state}/shbot/<HOST>.socket}`).
+  Every accepted connection is authenticated with kernel peer credentials
+  (`SO_PEERCRED`): connections from a different uid are rejected, and a client's
+  `hello <pid>` registration is only accepted when it matches the
+  kernel-provided pid, preventing PID-spoofing and client hijacking. The socket
+  file is created with mode `0600` and the state directory with `0700`,
+  independent of the process umask. The server enforces hard resource limits: a
+  64 KiB cap per protocol line, at most 128 concurrent connections, and an idle
+  timeout (`daemon.idle_timeout_sec`) that disconnects connections with no
+  client commands or server pushes within the configured window. A second daemon
+  instance refuses to bind over a live socket instead of unlinking it.
 - **`state.rs` (`DaemonState`):** A thread-safe, central registry of all
   connected `ClientInfo`s (using `tokio::sync::RwLock` around a `HashMap`). It
   maps PID to Working Directory (CWD) and holds a messaging channel
-  (`mpsc::Sender<String>`) bridging the async environment to the socket writer.
-  An in-flight set deduplicates concurrent evaluations of the same scope so that
-  slow or hanging tasks are not re-spawned on every trigger.
+  (`mpsc::Sender<String>`) bridging the async environment to the socket writer,
+  along with per-client `last_state` tracking to suppress redundant socket
+  updates. An in-flight dirty-latch (`HashMap<(StateId, PathBuf), bool>`)
+  deduplicates concurrent evaluations of the same scope while guaranteeing a
+  trailing re-evaluation if new filesystem events arrive while a crawl is
+  running.
 - **`watcher.rs` (`SyncWatcher`):** Leverages the `notify` crate to hook into
-  OS-level filesystem events securely. When a directory tree changes, it
-  immediately identifies intersecting CWDs of connected clients and triggers
-  both Git and File Watch Task re-evaluations. Event bursts flow through a
+  OS-level filesystem events securely. High-volume internal Git object and
+  lockfile writes (`.git/objects/**`, `.git/**/*.lock`) are filtered directly
+  inside the `notify` callback before entering the bounded event channel. When a
+  directory tree changes, it matches paths against pre-compiled `GlobMatcher`
+  and `GlobSet` patterns cached on `StateInvalidate` (`OnceLock`) and triggers
+  matching Git and File Watch Task re-evaluations. Event bursts flow through a
   bounded channel (excess events are dropped and re-detected on the next change)
   and recursive watches are capped at 256 paths; the daemon refuses to
   recursively watch `/`, `/proc`, `/sys`, `/dev`, and `/run`.
@@ -56,9 +62,10 @@ and broadcasting state updates back to specific shells.
   securely pushes executed outputs to matching clients over the socket via
   `broadcast_to_cwd`.
 - **`git.rs`:** Inspects the current state of a Git repository quickly using the
-  pure-Rust `gix` (`gitoxide`) library, determining dirty states or pending
-  commits dynamically when a client navigates into an active tree or when the
-  `watcher` detects modifications.
+  pure-Rust `gix` (`gitoxide`) library with parallel status checks (`parallel`
+  feature), a 4 MiB ODB object cache, single-load index reuse (`index_or_empty`
+  including `SKIP_WORKTREE` and `ASSUME_VALID` entry flags), exact-OID
+  tree/index rename tracking, and a bounded ahead/behind commit-walk cache.
 
 ## 2. Bootstrapping and Daemon Start-Up Process
 
@@ -124,9 +131,11 @@ connecting to the `shbot` daemon in the background.
 - **Asynchronous Reads (`zle -F`):** Instead of blocking the shell to wait for
   `shbot`, it registers a file descriptor to the Zsh Line Editor (`ZLE`). When
   the daemon finishes evaluating something (e.g., Git state or a file trigger)
-  and pushes data across the socket, Zsh silently interrupts, reads the payload,
-  updates internal variables (like `$SHBOT_STATE`), and safely issues a
-  `zle .reset-prompt` to visually reflect the new state.
+  and pushes data across the socket, Zsh silently interrupts, drains all
+  buffered protocol lines (`read -r -t 0`), updates internal variables (like
+  `$SHBOT_STATE` and `VCS_STATUS_*` via C-level `IFS=$'\x1f'` word splitting),
+  and issues a single `zle reset-prompt` at the end of the batch to visually
+  reflect the new state.
 - **Hooks (`add-zsh-hook`):** Uses Zsh lifecycle hooks to notify the daemon of
   state changes:
   - `chpwd`: When the user uses `cd`, the plugin sends `cd /new/path` to the

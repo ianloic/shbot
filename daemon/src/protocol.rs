@@ -57,8 +57,7 @@ impl Command {
     }
 }
 
-pub fn encode_payload(payload: &str) -> String {
-    let mut out = String::with_capacity(payload.len());
+pub fn encode_payload_into(out: &mut String, payload: &str) {
     for c in payload.chars() {
         match c {
             '%' => out.push_str("%25"),
@@ -70,6 +69,22 @@ pub fn encode_payload(payload: &str) -> String {
             _ => out.push(c),
         }
     }
+}
+
+#[cfg(test)]
+pub fn encode_payload(payload: &str) -> String {
+    let mut out = String::with_capacity(payload.len() + 64);
+    encode_payload_into(&mut out, payload);
+    out
+}
+
+pub fn format_update_message(name: &str, payload: &str) -> String {
+    let mut out = String::with_capacity(8 + name.len() + payload.len() + 64);
+    out.push_str("update ");
+    out.push_str(name);
+    out.push(' ');
+    encode_payload_into(&mut out, payload);
+    out.push('\n');
     out
 }
 

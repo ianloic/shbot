@@ -8,6 +8,7 @@ publish = false
 
 clap = { version = "4.6.1", features = ["derive"] }
 gix = { version = "0.90.0", default-features = false, features = [
+    "parallel",
     "revision",
     "sha1",
     "status",

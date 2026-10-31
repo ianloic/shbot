@@ -92,9 +92,13 @@ impl Scope {
             Scope::Cwd => Some(start_dir.to_path_buf()),
             Scope::Nearest(markers) => {
                 let mut current = start_dir;
+                let mut probe = PathBuf::with_capacity(start_dir.as_os_str().len() + 32);
                 loop {
                     for marker in markers {
-                        if current.join(marker).exists() {
+                        probe.clear();
+                        probe.push(current);
+                        probe.push(marker);
+                        if probe.exists() {
                             return Some(current.to_path_buf());
                         }
                     }
@@ -109,9 +113,13 @@ impl Scope {
             Scope::Topmost(markers) => {
                 let mut current = start_dir;
                 let mut topmost_match = None;
+                let mut probe = PathBuf::with_capacity(start_dir.as_os_str().len() + 32);
                 loop {
                     for marker in markers {
-                        if current.join(marker).exists() {
+                        probe.clear();
+                        probe.push(current);
+                        probe.push(marker);
+                        if probe.exists() {
                             topmost_match = Some(current.to_path_buf());
                             break;
                         }

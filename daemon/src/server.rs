@@ -13,23 +13,22 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use crate::config::Config;
-use crate::error::Result;
-use crate::error::ShbotError;
+use crate::error::{Result, ShbotError};
 use crate::protocol::Command;
 use crate::state::{DaemonState, Pid};
 use crate::watcher::SyncWatcher;
 use listenfd::ListenFd;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener as StdUnixListener;
-use std::os::unix::net::UnixStream as StdUnixStream;
+use std::io;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 use std::path::{Path, PathBuf};
+use std::str;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Semaphore;
-use tokio::time::Instant;
+use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::time::{Duration, Instant, sleep_until, timeout};
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, Registry, reload::Handle};
 
@@ -49,7 +48,7 @@ enum LineOutcome {
 async fn read_capped_line<R>(
     reader: &mut BufReader<R>,
     buf: &mut Vec<u8>,
-) -> std::io::Result<LineOutcome>
+) -> io::Result<LineOutcome>
 where
     R: AsyncRead + Unpin,
 {
@@ -95,8 +94,8 @@ pub fn restrict_to_owner(path: &Path) -> Result<()> {
 
 pub async fn run_server(
     state: Arc<DaemonState>,
-    config_rx: tokio::sync::watch::Receiver<Config>,
-    config_tx: tokio::sync::watch::Sender<Config>,
+    config_rx: watch::Receiver<Config>,
+    config_tx: watch::Sender<Config>,
     watcher: Arc<SyncWatcher>,
     socket_path: PathBuf,
     pre_bound_listener: Option<StdUnixListener>,
@@ -194,8 +193,8 @@ pub async fn run_server(
 async fn handle_connection(
     stream: UnixStream,
     state: Arc<DaemonState>,
-    config_rx: tokio::sync::watch::Receiver<Config>,
-    config_tx: tokio::sync::watch::Sender<Config>,
+    config_rx: watch::Receiver<Config>,
+    config_tx: watch::Sender<Config>,
     watcher: Arc<SyncWatcher>,
     peer_pid: Option<Pid>,
 ) -> Result<()> {
@@ -203,9 +202,9 @@ async fn handle_connection(
     let mut reader = BufReader::new(reader);
     let mut raw = Vec::with_capacity(128);
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(100);
+    let (tx, mut rx) = mpsc::channel::<String>(100);
 
-    let idle_timeout = tokio::time::Duration::from_secs(config_rx.borrow().daemon.idle_timeout_sec);
+    let idle_timeout = Duration::from_secs(config_rx.borrow().daemon.idle_timeout_sec);
     let deadline: Arc<StdMutex<Instant>> = Arc::new(StdMutex::new(Instant::now() + idle_timeout));
 
     // We don't know the PID until the client says `hello <pid>`
@@ -228,20 +227,20 @@ async fn handle_connection(
         let outcome = tokio::select! {
             biased;
             res = read_capped_line(&mut reader, &mut raw) => res,
-            _ = tokio::time::sleep_until(next_deadline) => {
+            _ = sleep_until(next_deadline) => {
                 warn!("Idle timeout expired for client {:?}", client_pid);
                 break;
             }
         };
 
-        let line = match outcome {
+        let command = match outcome {
             Ok(LineOutcome::Eof) => break,
             Ok(LineOutcome::Oversized) => {
                 warn!("Dropping connection: line exceeds {} bytes", MAX_LINE_BYTES);
                 break;
             }
-            Ok(LineOutcome::Line) => match String::from_utf8(raw.clone()) {
-                Ok(line) => line,
+            Ok(LineOutcome::Line) => match str::from_utf8(&raw) {
+                Ok(line) => Command::parse(line),
                 Err(_) => {
                     error!("Socket read error: invalid UTF-8");
                     break;
@@ -255,7 +254,7 @@ async fn handle_connection(
 
         *deadline.lock().unwrap() = Instant::now() + idle_timeout;
 
-        let Some(command) = Command::parse(&line) else {
+        let Some(command) = command else {
             continue;
         };
 
@@ -270,7 +269,6 @@ async fn handle_connection(
                         "error: pid {} does not match the connection owner\n",
                         pid
                     ));
-                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                     break;
                 }
                 client_pid = Some(pid);
@@ -307,7 +305,6 @@ async fn handle_connection(
                         let _ = tx.try_send(format!("error: failed to load config - {}\n", e));
                     }
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 break;
             }
             Command::Invalidate(arg) => {
@@ -340,7 +337,6 @@ async fn handle_connection(
                 } else {
                     let _ = tx.try_send("error: log reload handle not initialized\n".to_string());
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 break;
             }
             Command::Status => {
@@ -350,9 +346,6 @@ async fn handle_connection(
                     .get_status_dump(watcher.get_watch_count(), &config)
                     .await;
                 let _ = tx.try_send(dump);
-
-                // Yield to ensure the writer has a chance to write before we break and close the socket.
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 break;
             }
             Command::Unknown(cmd) => {
@@ -369,7 +362,8 @@ async fn handle_connection(
             .await;
     }
 
-    writer_task.abort();
+    drop(tx);
+    let _ = timeout(Duration::from_secs(1), writer_task).await;
     Ok(())
 }
 
@@ -379,7 +373,7 @@ mod tests {
     use crate::config::{Config, StateId};
     use crate::state::DaemonState;
     use crate::watcher::SyncWatcher;
-    use std::process::Command as StdCommand;
+    use std::process::{self, Command as StdCommand};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
@@ -387,11 +381,11 @@ mod tests {
     #[allow(unused_macros)]
     macro_rules! wait_for_watch_count {
         ($watcher:expr, $count:expr) => {
-            for _ in 0..50 {
+            for _ in 0..5_000 {
                 if $watcher.get_watch_count() == $count {
                     break;
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                tokio::task::yield_now().await;
             }
             assert_eq!($watcher.get_watch_count(), $count);
         };
@@ -470,7 +464,6 @@ mod tests {
             fs::write(config_dir.join("shbot.toml"), "invalid toml syntax = {").unwrap();
 
             client.write_all(b"reload\n").await.unwrap();
-            client.write_all(b"status\n").await.unwrap(); // Close connection
             let mut buf = String::new();
             client.read_to_string(&mut buf).await.unwrap();
             assert!(buf.contains("error: failed to load config"));
@@ -483,7 +476,6 @@ mod tests {
         let (mut client, _server_task, _state, _watcher) = setup_server().await;
 
         client.write_all(b"loglevel debug\n").await.unwrap();
-        client.write_all(b"status\n").await.unwrap(); // close connection
         let mut buf = String::new();
         client.read_to_string(&mut buf).await.unwrap();
         assert!(buf.contains("error: log reload handle not initialized"));
@@ -704,7 +696,6 @@ mod tests {
         let _ = LOG_RELOAD_HANDLE.set(handle);
 
         client.write_all(b"loglevel debug\n").await.unwrap();
-        client.write_all(b"status\n").await.unwrap();
 
         let mut buf = String::new();
         client.read_to_string(&mut buf).await.unwrap();
@@ -769,7 +760,7 @@ mod tests {
         let mode = fs::metadata(&socket_path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
 
-        let real_pid = std::process::id();
+        let real_pid = process::id();
         let mut rx = state.test_events_tx.subscribe();
         client
             .write_all(format!("hello {}\n", real_pid).as_bytes())
