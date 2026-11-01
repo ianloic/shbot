@@ -112,6 +112,39 @@ function _shbot_semver_compatible() {
 	return 0
 }
 
+function _shbot_semver_older() {
+	local running="$1"
+	local target="$2"
+	[[ -z "$running" ]] && return 0
+
+	local r_maj="${running%%.*}"
+	local r_rest="${running#*.}"
+	local r_min="${r_rest%%.*}"
+	local r_pat="${r_rest#*.}"
+	if [[ "$r_rest" == "$running" || "$r_pat" == "$r_rest" || "$r_pat" == *.* ]]; then
+		return 0
+	fi
+	if [[ -z "$r_maj" || -z "$r_min" || -z "$r_pat" || "$r_maj" == *[!0-9]* || "$r_min" == *[!0-9]* || "$r_pat" == *[!0-9]* ]]; then
+		return 0
+	fi
+
+	local t_maj="${target%%.*}"
+	local t_rest="${target#*.}"
+	local t_min="${t_rest%%.*}"
+	local t_pat="${t_rest#*.}"
+	if [[ "$t_rest" == "$target" || "$t_pat" == "$t_rest" || "$t_pat" == *.* ]]; then
+		return 1
+	fi
+	if [[ -z "$t_maj" || -z "$t_min" || -z "$t_pat" || "$t_maj" == *[!0-9]* || "$t_min" == *[!0-9]* || "$t_pat" == *[!0-9]* ]]; then
+		return 1
+	fi
+
+	if ((r_maj < t_maj || (r_maj == t_maj && r_min < t_min) || (r_maj == t_maj && r_min == t_min && r_pat < t_pat))); then
+		return 0
+	fi
+	return 1
+}
+
 function _shbot_find_fallback_bin() {
 	setopt local_options null_glob
 	local cache_root="$1"
@@ -408,18 +441,26 @@ function _shbot_connect() {
 		SHBOT_FD=0
 	fi
 
-	# Optimistically try connecting
-	if ! zsocket "$socket_path" 2>/dev/null; then
-		_shbot_debug "Socket not responding, starting daemon..."
-		if ! _shbot_resolve_bin; then
-			_shbot_debug "Failed to resolve shbot binary"
-			return 1
+	local needs_connect=0
+	if [[ -z "$SHBOT_SOCKET" ]]; then
+		local version_file="${socket_path%.socket}.version"
+		local running_version=""
+		[[ -r "$version_file" ]] && IFS= read -r running_version <"$version_file"
+		if _shbot_semver_older "$running_version" "$SHBOT_VERSION"; then
+			_shbot_debug "Daemon version '${running_version:-unknown}' is older than ${SHBOT_VERSION}; upgrading..."
+			needs_connect=1
 		fi
-		local shbot_cmd="$REPLY"
-		command "$shbot_cmd" connect || {
-			_shbot_debug "Daemon start failed"
-			return 1
-		}
+	fi
+
+	# Optimistically try connecting when daemon is up-to-date
+	if ((needs_connect)) || ! zsocket "$socket_path" 2>/dev/null; then
+		_shbot_debug "Starting or upgrading daemon..."
+		if _shbot_resolve_bin; then
+			local shbot_cmd="$REPLY"
+			command "$shbot_cmd" connect || _shbot_debug "Daemon start failed"
+		else
+			_shbot_debug "Failed to resolve shbot binary"
+		fi
 		zsocket "$socket_path" 2>/dev/null || {
 			_shbot_debug "Failed to connect to $socket_path after start"
 			return 1

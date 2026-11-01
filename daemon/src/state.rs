@@ -148,7 +148,9 @@ impl DaemonState {
     pub async fn get_status_dump(&self, num_monitors: usize, config: &Config) -> String {
         let clients = self.clients.read().await;
         let mut dump = "shbot daemon status:\n".to_string();
+        let version = env!("CARGO_PKG_VERSION");
         let git_hash = option_env!("SHBOT_GIT_HASH").unwrap_or("unknown");
+        dump.push_str(&format!("  Daemon Version: {}\n", version));
         dump.push_str(&format!("  Version / Git Hash: {}\n", git_hash));
         dump.push_str(&format!("  Daemon PID: {}\n", process::id()));
         dump.push_str(&format!("  Clients connected: {}\n", clients.len()));
@@ -337,6 +339,9 @@ impl DaemonState {
         }
 
         for target in targets_to_unwatch {
+            if self.has_active_watch_scope(&target, config).await {
+                continue;
+            }
             let watcher_clone = watcher.clone();
             let target_clone = target.clone();
             let _ = tokio::task::spawn_blocking(move || {
@@ -365,22 +370,27 @@ impl DaemonState {
             }
         }
 
-        // For newly created scopes, we need to watch them and evaluate them immediately
-        for key in newly_created_scopes {
-            if let Some(state_config) = config.state.get(&key.0) {
-                if state_config.invalidate.watch.is_some()
-                    || state_config.invalidate.pwd.unwrap_or(false)
-                {
-                    let watcher_clone = watcher.clone();
-                    let target = key.1.clone();
-                    let reasons = vec![key.0.0.clone()];
-                    let _ = tokio::task::spawn_blocking(move || {
-                        watcher_clone.watch(&target, &reasons);
-                    })
-                    .await;
-                }
+        // Ensure every watch-enabled scope for this client has an active file monitor,
+        // even if the scope already existed when this client entered.
+        for key in &new_scopes {
+            if let Some(state_config) = config.state.get(&key.0)
+                && (state_config.invalidate.watch.is_some()
+                    || state_config.invalidate.pwd.unwrap_or(false))
+                && !watcher.is_watching(&key.1)
+            {
+                let watcher_clone = watcher.clone();
+                let target = key.1.clone();
+                let reasons = vec![key.0.0.clone()];
+                let _ = tokio::task::spawn_blocking(move || {
+                    watcher_clone.watch(&target, &reasons);
+                })
+                .await;
+            }
+        }
 
-                // Trigger initial evaluation
+        // For newly created scopes, trigger initial evaluation immediately
+        for key in newly_created_scopes {
+            if config.state.contains_key(&key.0) {
                 let start_trigger = Instant::now();
                 evaluate_scoped_state(&key.0, &key.1, self, config).await;
                 self.last_trigger_refresh_micros.store(
@@ -389,6 +399,19 @@ impl DaemonState {
                 );
             }
         }
+    }
+
+    async fn has_active_watch_scope(&self, target: &Path, config: &Config) -> bool {
+        let scoped_states = self.scoped_states.read().await;
+        for (other_key, _) in scoped_states.iter() {
+            if other_key.1 == target
+                && let Some(sc) = config.state.get(&other_key.0)
+                && (sc.invalidate.watch.is_some() || sc.invalidate.pwd.unwrap_or(false))
+            {
+                return true;
+            }
+        }
+        false
     }
 
     pub async fn handle_client_disconnect(
@@ -447,6 +470,9 @@ impl DaemonState {
         }
 
         for target in targets_to_unwatch {
+            if self.has_active_watch_scope(&target, config).await {
+                continue;
+            }
             let watcher_clone = watcher.clone();
             let target_clone = target.clone();
             let _ = tokio::task::spawn_blocking(move || {

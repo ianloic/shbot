@@ -222,8 +222,6 @@ impl Config {
                             "**/.npm/**".to_string(),
                             "**/.nvm/**".to_string(),
                             "**/.git/objects/**".to_string(),
-                            "**/.git/*.lock".to_string(),
-                            "**/.git/refs/**/*.lock".to_string(),
                         ]),
                         pwd: Some(true),
                         ..Default::default()

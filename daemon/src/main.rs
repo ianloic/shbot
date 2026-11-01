@@ -225,12 +225,77 @@ fn setup_logging(log_file: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+fn parse_semver(ver: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = ver.trim().split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+fn check_running_daemon(socket_path: &Path, current_version: &str) -> (bool, Option<u32>) {
+    let Ok(mut stream) = StdUnixStream::connect(socket_path) else {
+        return (false, None);
+    };
+    let timeout = Some(Duration::from_millis(500));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+    if stream.write_all(b"status\n").is_err() {
+        return (false, None);
+    }
+    let mut response = String::new();
+    if stream.read_to_string(&mut response).is_err() {
+        return (false, None);
+    }
+
+    let mut running_version = None;
+    let mut running_pid = None;
+    for line in response.lines() {
+        if let Some(ver) = line.trim().strip_prefix("Daemon Version:") {
+            running_version = Some(ver.trim());
+        } else if let Some(pid_str) = line.trim().strip_prefix("Daemon PID:") {
+            running_pid = pid_str.trim().parse::<u32>().ok();
+        }
+    }
+
+    if let Some(rv) = running_version {
+        let is_up_to_date = match (parse_semver(rv), parse_semver(current_version)) {
+            (Some(run_sem), Some(cur_sem)) => run_sem >= cur_sem,
+            _ => rv == current_version,
+        };
+        if is_up_to_date {
+            let version_path = socket_path.with_extension("version");
+            if fs::write(&version_path, format!("{}\n", rv)).is_ok() {
+                let _ = restrict_to_owner(&version_path);
+            }
+            return (true, running_pid);
+        }
+    }
+
+    (false, running_pid)
+}
+
 fn handle_connect() -> Result<()> {
     let socket_path = get_socket_path()?;
+    let current_version = env!("CARGO_PKG_VERSION");
 
-    // Quick check if socket is already responsive
-    if socket_path.exists() && StdUnixStream::connect(&socket_path).is_ok() {
-        return Ok(());
+    // Check if socket is already responsive and running an up-to-date daemon
+    if socket_path.exists() {
+        let (up_to_date, old_pid) = check_running_daemon(&socket_path, current_version);
+        if up_to_date {
+            return Ok(());
+        }
+        // Unlink the socket before terminating the old daemon so the new daemon can bind immediately
+        let _ = fs::remove_file(&socket_path);
+        if let Some(pid) = old_pid {
+            let _ = StdCommand::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status();
+        }
     }
 
     let state_dir = socket_path.parent().unwrap().to_path_buf();
@@ -396,6 +461,61 @@ mod tests {
                 assert!(handle_reload().is_ok());
                 assert!(handle_loglevel("debug").is_ok());
             },
+        );
+    }
+
+    #[test]
+    fn test_parse_semver_and_check_running_daemon() {
+        assert_eq!(parse_semver("0.2.0"), Some((0, 2, 0)));
+        assert_eq!(parse_semver("1.10.3\n"), Some((1, 10, 3)));
+        assert_eq!(parse_semver("invalid"), None);
+        assert_eq!(parse_semver("1.2.3.4"), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("test.socket");
+        let listener = StdUnixListener::bind(&socket_path).unwrap();
+
+        thread::spawn(move || {
+            let responses = [
+                "shbot daemon status:\n  Version / Git Hash: unknown\n  Daemon PID: 4242\n",
+                "shbot daemon status:\n  Daemon Version: 0.1.0\n  Daemon PID: 4243\n",
+                "shbot daemon status:\n  Daemon Version: 0.2.0\n  Daemon PID: 4244\n",
+                "shbot daemon status:\n  Daemon Version: 0.3.0\n  Daemon PID: 4245\n",
+            ];
+            for resp in responses {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut buf = [0; 128];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(resp.as_bytes());
+                }
+            }
+        });
+
+        // Legacy daemon without Daemon Version line -> outdated
+        assert_eq!(
+            check_running_daemon(&socket_path, "0.2.0"),
+            (false, Some(4242))
+        );
+        // Older version -> outdated
+        assert_eq!(
+            check_running_daemon(&socket_path, "0.2.0"),
+            (false, Some(4243))
+        );
+        // Matching version -> up-to-date and writes .version file
+        assert_eq!(
+            check_running_daemon(&socket_path, "0.2.0"),
+            (true, Some(4244))
+        );
+        assert_eq!(
+            fs::read_to_string(socket_path.with_extension("version"))
+                .unwrap()
+                .trim(),
+            "0.2.0"
+        );
+        // Newer version -> treated as up-to-date (no downgrade)
+        assert_eq!(
+            check_running_daemon(&socket_path, "0.2.0"),
+            (true, Some(4245))
         );
     }
 }

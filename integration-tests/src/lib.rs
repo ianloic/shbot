@@ -464,6 +464,72 @@ mod tests {
     }
 
     #[test]
+    fn test_git_watcher_survives_deleted_subdir_and_cd_roundtrip() -> Result<(), Box<dyn Error>> {
+        let mut env = TestEnv::new()?;
+        let repo_path = env.setup_git_repo("myrepo")?;
+        let outside_path = env.home_dir.path().join("outside_repo");
+        fs::create_dir_all(&outside_path)?;
+
+        env.start_daemon()?;
+
+        env.send_line("export SHBOT_SET_VCS_STATUS=1")?;
+        env.send_line(&format!("cd {}", repo_path.display()))?;
+        env.source_plugin()?;
+
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("print -r -- \"U=${VCS_STATUS_NUM_UNTRACKED}\"")?;
+            Ok::<bool, Box<dyn Error>>(out.contains("U=0"))
+        })?;
+
+        // 1. Create a subdirectory and a file inside it; wait for untracked=1 to prove
+        //    notify has registered a recursive inotify watch on the subdirectory.
+        env.send_line("mkdir subdir && touch subdir/nested.txt")?;
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("print -r -- \"U=${VCS_STATUS_NUM_UNTRACKED}\"")?;
+            Ok::<bool, Box<dyn Error>>(out.contains("U=1"))
+        })?;
+
+        // 2. Delete the watched subdirectory and wait for untracked=0.
+        //    In notify's inotify backend, deleting a watched subdirectory leaves a stale
+        //    watch descriptor in notify's internal path map.
+        env.send_line("rm -rf subdir")?;
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("print -r -- \"U=${VCS_STATUS_NUM_UNTRACKED}\"")?;
+            Ok::<bool, Box<dyn Error>>(out.contains("U=0"))
+        })?;
+
+        // 3. cd out of the repo so the daemon unwatches repo_path, then cd back in.
+        env.send_line(&format!("cd {}", outside_path.display()))?;
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("print -r -- \"RES=${VCS_STATUS_RESULT}\"")?;
+            Ok::<bool, Box<dyn Error>>(out.contains("RES=norepo-sync"))
+        })?;
+
+        env.send_line(&format!("cd {}", repo_path.display()))?;
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("print -r -- \"RES=${VCS_STATUS_RESULT}\"")?;
+            Ok::<bool, Box<dyn Error>>(out.contains("RES=ok-sync"))
+        })?;
+
+        // 4. Now `touch asdf` and `rm asdf` in the repo root MUST immediately update
+        //    VCS_STATUS_NUM_UNTRACKED without running `git status`.
+        env.send_line("touch asdf")?;
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("print -r -- \"AFTER_TOUCH=${VCS_STATUS_NUM_UNTRACKED}\"")?;
+            Ok::<bool, Box<dyn Error>>(out.contains("AFTER_TOUCH=1"))
+        })?;
+
+        env.send_line("rm asdf")?;
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("print -r -- \"AFTER_RM=${VCS_STATUS_NUM_UNTRACKED}\"")?;
+            Ok::<bool, Box<dyn Error>>(out.contains("AFTER_RM=0"))
+        })?;
+
+        env.kill_daemon();
+        Ok(())
+    }
+
+    #[test]
     fn test_cli_commands() -> Result<(), Box<dyn std::error::Error>> {
         let mut env = TestEnv::new()?;
         let repo_path = env.setup_git_repo("myrepo")?;

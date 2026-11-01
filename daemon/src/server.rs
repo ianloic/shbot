@@ -123,6 +123,11 @@ pub async fn run_server(
             fs::remove_file(&socket_path)?;
         }
 
+        let version_path = socket_path.with_extension("version");
+        if fs::write(&version_path, format!("{}\n", env!("CARGO_PKG_VERSION"))).is_ok() {
+            let _ = restrict_to_owner(&version_path);
+        }
+
         info!("Binding to socket: {:?}", socket_path);
         let listener = UnixListener::bind(&socket_path)?;
         restrict_to_owner(&socket_path)?;

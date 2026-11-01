@@ -42,15 +42,20 @@ and broadcasting state updates back to specific shells.
   trailing re-evaluation if new filesystem events arrive while a crawl is
   running.
 - **`watcher.rs` (`SyncWatcher`):** Leverages the `notify` crate to hook into
-  OS-level filesystem events securely. High-volume internal Git object and
-  lockfile writes (`.git/objects/**`, `.git/**/*.lock`) are filtered directly
-  inside the `notify` callback before entering the bounded event channel. When a
-  directory tree changes, it matches paths against pre-compiled `GlobMatcher`
-  and `GlobSet` patterns cached on `StateInvalidate` (`OnceLock`) and triggers
-  matching Git and File Watch Task re-evaluations. Event bursts flow through a
-  bounded channel (excess events are dropped and re-detected on the next change)
-  and recursive watches are capped at 256 paths; the daemon refuses to
-  recursively watch `/`, `/proc`, `/sys`, `/dev`, and `/run`.
+  OS-level filesystem events securely. High-volume internal Git object writes
+  (`.git/objects/**`) are filtered directly inside the `notify` callback before
+  entering the bounded event channel. When a directory tree changes, it matches
+  paths against pre-compiled `GlobMatcher` and `GlobSet` patterns cached on
+  `StateInvalidate` (`OnceLock`) and triggers matching Git and File Watch Task
+  re-evaluations. When unwatching a scope root, if `notify`'s `inotify` backend
+  encounters a partial-unwatch error (`EINVAL` from a subdirectory that was
+  deleted while watched), `SyncWatcher` always removes the scope from
+  `watched_paths` and rebuilds the underlying `RecommendedWatcher` so future
+  re-entries into the directory are watched cleanly without leaking child
+  descriptors. Event bursts flow through a bounded channel (excess events are
+  dropped and re-detected on the next change) and recursive watches are capped
+  at 256 paths; the daemon refuses to recursively watch `/`, `/proc`, `/sys`,
+  `/dev`, and `/run`.
 - **`runner.rs`:** Handles user-defined `shbot.toml` configurations. Executes
   background tasks ranging from simple `timeout` recurring actions to targeted
   `watch` state invalidations on specific paths. Supports directory scoping (via
@@ -78,13 +83,17 @@ using `systemd` socket activation or a built-in self-spawn fallback mechanism:
    Zsh) tries to communicate with the socket, systemd automatically spawns the
    daemon and passes the active `UnixListener` via the `ListenFd` crate. systemd
    pre-creates the socket with `SocketMode=0600`.
-2. **Shell Check:** When the Zsh plugin starts, it uses the native `zsocket`
-   command to immediately test the socket file
-   (`~/.local/state/shbot/<HOST>.socket`). If the socket responds, connection
-   completes instantly.
-3. **Binary Resolution & Lazy Download (`_shbot_resolve_bin`):** If no daemon is
-   listening (and systemd is unavailable), the Zsh plugin locates the `shbot`
-   executable in priority order:
+2. **Shell Check & Version Guard:** When the Zsh plugin starts, it reads
+   `~/.local/state/shbot/<HOST>.version` (written by the daemon before binding
+   the socket). If the running daemon's version is missing or older than
+   `$SHBOT_VERSION`, or if `zsocket` cannot connect to
+   `~/.local/state/shbot/<HOST>.socket`, the plugin resolves the `shbot` binary
+   and runs `shbot connect` to start or upgrade the daemon. When the running
+   daemon version is already up to date, `zsocket` connects immediately with
+   zero subprocess forks.
+3. **Binary Resolution & Lazy Download (`_shbot_resolve_bin`):** If no
+   up-to-date daemon is listening, the Zsh plugin locates the `shbot` executable
+   in priority order:
    - `$SHBOT_BIN` (explicit environment override)
    - `${XDG_STATE_HOME:-$HOME/.local/state}/shbot/dev-bin` (local development
      symlink managed by `mise run dev-link` / `mise run dev-unlink`)
@@ -107,13 +116,16 @@ using `systemd` socket activation or a built-in self-spawn fallback mechanism:
      `~/.cache/shbot/v*/`.
 4. **Foreground Launcher (`shbot connect`):** Once resolved, the shell
    synchronously runs `<shbot_bin> connect`.
-5. **Stale Socket Cleanup:** The launcher probes the existing socket file; a
-   stale leftover from a crashed daemon is unlinked, while a live socket ends
-   the bootstrap immediately. The daemon itself repeats this liveness check and
-   refuses to bind over a socket owned by another live daemon.
+5. **Stale Socket Cleanup & Version Replacement:** The launcher probes the
+   existing socket file with a `status` query; if a live daemon is already
+   running at the current (or a newer) version, the bootstrap returns
+   immediately. If the socket is stale or belongs to an older daemon version,
+   the launcher unlinks the socket, sends `SIGTERM` to the old `Daemon PID`, and
+   spawns the new daemon.
 6. **Self-Spawn:** The launcher spawns `<current_exe> daemon` (fork + exec) with
    stdio redirected to the per-host log file. The daemon process creates the
-   state directory (`0700`) and binds the socket (`0600`) itself.
+   state directory (`0700`), writes `<HOST>.version` (`0600`), and binds the
+   socket (`0600`) itself.
 7. **Startup Verification:** The launcher polls briefly (bounded to ~500 ms)
    until the socket responds, then returns control to Zsh, which completes the
    `zsocket` connection with zero additional delay.

@@ -18,7 +18,8 @@ use crate::error::Result;
 use crate::runner::evaluate_watch_tasks;
 use crate::state::DaemonState;
 use notify::{
-    Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+    Config as NotifyConfig, ErrorKind as NotifyErrorKind, Event, EventKind, RecommendedWatcher,
+    RecursiveMode, Watcher,
 };
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -55,18 +56,39 @@ fn is_noisy_git_internal_path(path: &Path) -> bool {
             }
         }
     }
-    if saw_git
-        && let Some(ext) = path.extension()
-        && ext == "lock"
-    {
-        return true;
-    }
     false
+}
+
+fn create_recommended_watcher(tx: mpsc::Sender<PathBuf>) -> Result<RecommendedWatcher> {
+    let watcher = RecommendedWatcher::new(
+        move |res: notify::Result<Event>| {
+            if let Ok(event) = res {
+                // Ignore file read access to prevent infinite loops where
+                // reading the git status triggers a notify event.
+                if matches!(event.kind, EventKind::Access(_)) {
+                    return;
+                }
+                for path in event.paths {
+                    if is_noisy_git_internal_path(&path) {
+                        continue;
+                    }
+                    // Drop events when the queue is full rather than
+                    // growing without bound during event storms.
+                    if tx.try_send(path).is_err() {
+                        debug!("Watcher event queue full; dropping event");
+                    }
+                }
+            }
+        },
+        NotifyConfig::default(),
+    )?;
+    Ok(watcher)
 }
 
 pub struct SyncWatcher {
     watcher: StdMutex<Option<RecommendedWatcher>>,
     watched_paths: StdMutex<HashSet<PathBuf>>,
+    event_tx: StdMutex<Option<mpsc::WeakSender<PathBuf>>>,
 }
 
 impl SyncWatcher {
@@ -74,34 +96,15 @@ impl SyncWatcher {
         Arc::new(Self {
             watcher: StdMutex::new(None),
             watched_paths: StdMutex::new(HashSet::new()),
+            event_tx: StdMutex::new(None),
         })
     }
 
     pub fn start(&self, state: Arc<DaemonState>, config_rx: watch::Receiver<Config>) -> Result<()> {
         let (tx, mut rx) = mpsc::channel::<PathBuf>(EVENT_CHANNEL_CAPACITY);
+        *self.event_tx.lock().unwrap() = Some(tx.downgrade());
 
-        let watcher = RecommendedWatcher::new(
-            move |res: notify::Result<Event>| {
-                if let Ok(event) = res {
-                    // Ignore file read access to prevent infinite loops where
-                    // reading the git status triggers a notify event.
-                    if matches!(event.kind, EventKind::Access(_)) {
-                        return;
-                    }
-                    for path in event.paths {
-                        if is_noisy_git_internal_path(&path) {
-                            continue;
-                        }
-                        // Drop events when the queue is full rather than
-                        // growing without bound during event storms.
-                        if tx.try_send(path).is_err() {
-                            debug!("Watcher event queue full; dropping event");
-                        }
-                    }
-                }
-            },
-            NotifyConfig::default(),
-        )?;
+        let watcher = create_recommended_watcher(tx)?;
 
         *self.watcher.lock().unwrap() = Some(watcher);
 
@@ -151,6 +154,10 @@ impl SyncWatcher {
         self.watched_paths.lock().unwrap().len()
     }
 
+    pub fn is_watching(&self, path: &Path) -> bool {
+        self.watched_paths.lock().unwrap().contains(path)
+    }
+
     pub fn watch(&self, path: &Path, reasons: &[String]) {
         if path.as_os_str().is_empty() {
             return;
@@ -193,20 +200,59 @@ impl SyncWatcher {
         }
 
         let mut paths = self.watched_paths.lock().unwrap();
-        if !paths.contains(path) {
+        if !paths.remove(path) {
             return;
         }
 
-        if let Some(w) = self.watcher.lock().unwrap().as_mut() {
+        let mut watcher_guard = self.watcher.lock().unwrap();
+        let mut needs_rebuild = false;
+        if let Some(w) = watcher_guard.as_mut() {
             if let Err(e) = w.unwatch(path) {
-                // Ignore completely unwatched/not found errors safely without failing
-                let e_str = e.to_string();
-                if !e_str.contains("No watch found") && !e_str.contains("NotFound") {
-                    warn!("Failed to unwatch {:?}: {}", path, e);
+                // notify's inotify backend removes the top-level watch on `path` first and then
+                // iterates child watches; if any child directory under `path` was deleted while
+                // watched, inotify_rm_watch returns EINVAL (os error 22) and aborts the loop,
+                // leaking the remaining child watches and poisoning notify's internal descriptor
+                // map. We always remove `path` from `watched_paths` so future `watch(path)` calls
+                // succeed, and rebuild the watcher to reclaim any leaked child descriptors.
+                let is_not_found = matches!(
+                    e.kind,
+                    NotifyErrorKind::WatchNotFound | NotifyErrorKind::PathNotFound
+                );
+                if !is_not_found {
+                    debug!(
+                        "Partial unwatch for {:?} ({}); rebuilding watcher for {} active paths",
+                        path,
+                        e,
+                        paths.len()
+                    );
+                    needs_rebuild = true;
                 }
-            } else {
-                paths.remove(path);
-                info!("Stopped monitoring directory: {:?}", path);
+            }
+            info!("Stopped monitoring directory: {:?}", path);
+        }
+
+        if needs_rebuild
+            && let Some(weak_tx) = self.event_tx.lock().unwrap().as_ref()
+            && let Some(tx) = weak_tx.upgrade()
+        {
+            // Drop the old watcher first so its kernel inotify fd is closed immediately,
+            // releasing all leaked child watch descriptors.
+            *watcher_guard = None;
+            match create_recommended_watcher(tx) {
+                Ok(mut new_watcher) => {
+                    for active_path in paths.iter() {
+                        if let Err(e) = new_watcher.watch(active_path, RecursiveMode::Recursive) {
+                            warn!(
+                                "Failed to re-watch {:?} after watcher rebuild: {}",
+                                active_path, e
+                            );
+                        }
+                    }
+                    *watcher_guard = Some(new_watcher);
+                }
+                Err(e) => {
+                    warn!("Failed to rebuild watcher after unwatch error: {}", e);
+                }
             }
         }
     }
@@ -215,6 +261,7 @@ impl SyncWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_sync_watcher_watch_unwatch() {
@@ -238,10 +285,10 @@ mod tests {
         assert!(is_noisy_git_internal_path(Path::new(
             "/repo/.git/objects/ab/cd1234"
         )));
-        assert!(is_noisy_git_internal_path(Path::new(
+        assert!(!is_noisy_git_internal_path(Path::new(
             "/repo/.git/index.lock"
         )));
-        assert!(is_noisy_git_internal_path(Path::new(
+        assert!(!is_noisy_git_internal_path(Path::new(
             "/repo/.git/refs/heads/main.lock"
         )));
         assert!(!is_noisy_git_internal_path(Path::new("/repo/.git/index")));
@@ -328,5 +375,38 @@ mod tests {
         let extra = temp.path().join("extra");
         watcher.watch(&extra, &[]);
         assert_eq!(watcher.get_watch_count(), MAX_WATCHED_PATHS);
+    }
+
+    #[tokio::test]
+    async fn test_unwatch_after_deleted_subdir_allows_rewatch() {
+        let watcher = SyncWatcher::new();
+        let state = DaemonState::new();
+        let (_config_tx, config_rx) = watch::channel(Config::default());
+
+        watcher.start(state, config_rx).unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let sub = temp.path().join("sub");
+        fs::create_dir_all(&sub).unwrap();
+
+        watcher.watch(temp.path(), &["git".to_string()]);
+        assert_eq!(watcher.get_watch_count(), 1);
+
+        // Delete the watched subdirectory so the kernel auto-removes its inotify watch
+        // and notify's internal paths map retains a stale WatchDescriptor.
+        fs::remove_dir_all(&sub).unwrap();
+
+        // Unwatching the parent directory must still remove it from watched_paths
+        // even if notify returns EINVAL (os error 22) for the deleted subdirectory.
+        watcher.unwatch(temp.path());
+        assert_eq!(
+            watcher.get_watch_count(),
+            0,
+            "watched_paths must not leak when unwatch encounters a deleted subdirectory"
+        );
+
+        // Re-watching the parent directory must succeed again.
+        watcher.watch(temp.path(), &["git".to_string()]);
+        assert_eq!(watcher.get_watch_count(), 1);
     }
 }
