@@ -206,12 +206,15 @@ manual debugging.
   daemon's internal state (including the daemon PID, every client's PID and CWD,
   and state metrics). The daemon will respond and then immediately close the
   connection.
-- `reload`: Sent by the `shbot reload` CLI command. Forces the daemon to reload
-  its configuration from disk and apply it immediately.
+- `reload`: Sent by the `shbot reload` CLI command (or triggered via `SIGHUP`).
+  Forces the daemon to reload its configuration from disk, reconcile active
+  scopes and file watches for all connected clients, and evaluate any newly
+  added states immediately.
 - `loglevel <level>`: Sent by `shbot loglevel <level>`. Modifies the daemon's
   running `EnvFilter` without restarting.
-- `invalidate <target>`: Forces the daemon to discard and re-evaluate cached
-  state.
+- `invalidate <target>`: Forces the daemon to discard cached values and
+  immediately re-evaluate matching active scopes (`*`, `all`, `<state_id>`, or
+  `<scope_root>`).
 
 ### Daemon to Client Events:
 

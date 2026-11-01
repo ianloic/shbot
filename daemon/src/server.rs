@@ -15,6 +15,7 @@
 use crate::config::Config;
 use crate::error::{Result, ShbotError};
 use crate::protocol::Command;
+use crate::runner::evaluate_scoped_state;
 use crate::state::{DaemonState, Pid};
 use crate::watcher::SyncWatcher;
 use listenfd::ListenFd;
@@ -295,11 +296,14 @@ async fn handle_connection(
                 info!("Reload request received via socket");
                 match Config::load() {
                     Ok(new_config) => {
-                        if let Err(e) = config_tx.send(new_config) {
+                        if let Err(e) = config_tx.send(new_config.clone()) {
                             error!("Failed to broadcast config on reload: {}", e);
                             let _ =
                                 tx.try_send("error: failed to broadcast new config\n".to_string());
                         } else {
+                            state
+                                .handle_config_reload(watcher.clone(), &new_config)
+                                .await;
                             let _ = tx.try_send(
                                 "status: configuration reloaded successfully\n".to_string(),
                             );
@@ -315,6 +319,23 @@ async fn handle_connection(
             Command::Invalidate(arg) => {
                 info!("Invalidate request for: {}", arg);
                 state.invalidate(&arg).await;
+                let config = config_rx.borrow().clone();
+                let active_scopes: Vec<_> = {
+                    let scoped_states = state.scoped_states.read().await;
+                    scoped_states
+                        .keys()
+                        .filter(|(name, root)| {
+                            arg == "*"
+                                || arg == "all"
+                                || name.0 == arg
+                                || root.to_string_lossy() == arg
+                        })
+                        .cloned()
+                        .collect()
+                };
+                for (name, root) in active_scopes {
+                    evaluate_scoped_state(&name, &root, &state, &config).await;
+                }
             }
             Command::LogLevel(arg) => {
                 if let Some(handle) = LOG_RELOAD_HANDLE.get() {
@@ -881,5 +902,143 @@ mod tests {
             "idle client must be disconnected"
         );
         let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn test_server_partial_line_eof_invalid_hello_cd_before_hello_and_invalid_loglevel() {
+        let (_filter, handle) = tracing_subscriber::reload::Layer::new(EnvFilter::new("info"));
+        let _ = LOG_RELOAD_HANDLE.set(handle);
+
+        let (mut client, server_task, _state, _watcher) = setup_server().await;
+        // 1. cd before hello + invalid hello + unknown command + partial line without trailing newline on EOF
+        client
+            .write_all(b"cd /tmp\nhello not_a_pid\nunknown_cmd\nloglevel ===invalid===")
+            .await
+            .unwrap();
+        client.shutdown().await.unwrap();
+
+        let mut buf = String::new();
+        client.read_to_string(&mut buf).await.unwrap();
+        assert!(
+            buf.contains("error: invalid log level"),
+            "expected invalid log level error, got: {}",
+            buf
+        );
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn test_server_invalidate_re_evaluates_active_scope() {
+        use crate::config::{StateConfig, StateId, StateInvalidate, StateSource};
+        use crate::scope::Scope;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("val.txt");
+        fs::write(&file_path, "first_val").unwrap();
+
+        let (client, server_task, state, watcher) = setup_server_with_peer(Some(777)).await;
+        let mut config = Config::default();
+        config.state.remove("git");
+        config.state.insert(
+            StateId::from("my_val"),
+            StateConfig {
+                scope: Scope::Cwd,
+                source: StateSource::File {
+                    file: "val.txt".to_string(),
+                },
+                invalidate: StateInvalidate::default(),
+            },
+        );
+
+        // Replace connection with one holding our custom config
+        drop(client);
+        let _ = server_task.await;
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let (config_tx, config_rx) = watch::channel(config);
+        let server_task = tokio::spawn(handle_connection(
+            server,
+            state.clone(),
+            config_rx,
+            config_tx,
+            watcher,
+            Some(777),
+        ));
+
+        let mut events_rx = state.test_events_tx.subscribe();
+        client.write_all(b"hello 777\n").await.unwrap();
+        let _ = events_rx.recv().await;
+
+        let cd_cmd = format!("cd {}\n", dir.path().display());
+        client.write_all(cd_cmd.as_bytes()).await.unwrap();
+        // Wait for update_scoped_state event
+        let _ = events_rx.recv().await;
+
+        // Modify file and trigger explicit invalidate
+        fs::write(&file_path, "second_val").unwrap();
+        client.write_all(b"invalidate my_val\n").await.unwrap();
+        let _ = events_rx.recv().await;
+        let _ = events_rx.recv().await;
+
+        drop(client);
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn test_run_server_pre_bound_listener_and_stale_socket_unlink() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // 1. Test stale socket unlinking: create a socket file with no active listener
+        let stale_socket = temp_dir.path().join("stale.socket");
+        {
+            let listener = StdUnixListener::bind(&stale_socket).unwrap();
+            drop(listener);
+        }
+        assert!(stale_socket.exists());
+
+        let state = DaemonState::new();
+        let watcher = SyncWatcher::new();
+        let (config_tx, config_rx) = watch::channel(Config::default());
+        let task1 = tokio::spawn(run_server(
+            state.clone(),
+            config_rx,
+            config_tx,
+            watcher.clone(),
+            stale_socket.clone(),
+            None,
+        ));
+        for _ in 0..100_000 {
+            if UnixStream::connect(&stale_socket).await.is_ok() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        task1.abort();
+
+        // 2. Test pre_bound_listener path
+        let prebound_socket = temp_dir.path().join("prebound.socket");
+        let std_listener = StdUnixListener::bind(&prebound_socket).unwrap();
+        let (config_tx2, config_rx2) = watch::channel(Config::default());
+        let task2 = tokio::spawn(run_server(
+            state,
+            config_rx2,
+            config_tx2,
+            watcher,
+            prebound_socket.clone(),
+            Some(std_listener),
+        ));
+        let mut connected = false;
+        for _ in 0..100_000 {
+            if UnixStream::connect(&prebound_socket).await.is_ok() {
+                connected = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            connected,
+            "pre-bound listener server must accept connections"
+        );
+        task2.abort();
     }
 }

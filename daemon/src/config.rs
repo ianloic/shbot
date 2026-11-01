@@ -16,13 +16,14 @@
 use crate::error::Result;
 use crate::scope::Scope;
 use globset::{Glob, GlobBuilder, GlobMatcher, GlobSet, GlobSetBuilder};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::result::Result as StdResult;
 use std::sync::OnceLock;
 use tracing::error;
 
@@ -102,15 +103,69 @@ fn default_command_timeout() -> u64 {
     60 // 1 minute
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct StateConfig {
-    #[serde(default)]
     pub scope: Scope,
-    #[serde(flatten)]
     pub source: StateSource,
-    #[serde(flatten)]
     pub invalidate: StateInvalidate,
+}
+
+#[derive(Deserialize)]
+struct RawStateConfig {
+    #[serde(default)]
+    scope: Scope,
+    source: Option<StateSource>,
+    file: Option<String>,
+    command: Option<String>,
+    native: Option<String>,
+    invalidate: Option<StateInvalidate>,
+    watch: Option<String>,
+    ignore: Option<Vec<String>>,
+    timeout: Option<u64>,
+    pwd: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for StateConfig {
+    fn deserialize<D>(deserializer: D) -> StdResult<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawStateConfig::deserialize(deserializer)?;
+        let source = if let Some(src) = raw.source {
+            src
+        } else if let Some(file) = raw.file {
+            StateSource::File { file }
+        } else if let Some(command) = raw.command {
+            StateSource::Command { command }
+        } else if let Some(native) = raw.native {
+            StateSource::Native { native }
+        } else {
+            return Err(serde::de::Error::custom(
+                "missing state source (expected `command`, `file`, `native`, or `source.*`)",
+            ));
+        };
+
+        let mut invalidate = raw.invalidate.unwrap_or_default();
+        if invalidate.watch.is_none() {
+            invalidate.watch = raw.watch;
+        }
+        if invalidate.ignore.is_none() {
+            invalidate.ignore = raw.ignore;
+        }
+        if invalidate.timeout.is_none() {
+            invalidate.timeout = raw.timeout;
+        }
+        if invalidate.pwd.is_none() {
+            invalidate.pwd = raw.pwd;
+        }
+
+        Ok(StateConfig {
+            scope: raw.scope,
+            source,
+            invalidate,
+        })
+    }
 }
 
 impl StateConfig {
@@ -121,6 +176,35 @@ impl StateConfig {
             Some(file.as_str())
         } else {
             None
+        }
+    }
+
+    pub fn should_watch(&self) -> bool {
+        self.watch_pattern().is_some() || self.invalidate.pwd.unwrap_or(false)
+    }
+
+    pub fn evaluate_scope(&self, start_dir: &Path) -> Option<PathBuf> {
+        if start_dir.as_os_str().is_empty() {
+            return None;
+        }
+        match &self.scope {
+            Scope::Global => {
+                if let StateSource::File { file } = &self.source {
+                    let file_path = Path::new(file);
+                    if file_path.is_absolute() {
+                        return file_path
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .or_else(|| Some(PathBuf::from("/")));
+                    }
+                }
+                if self.should_watch() {
+                    Some(start_dir.to_path_buf())
+                } else {
+                    Some(PathBuf::from("/"))
+                }
+            }
+            other => other.evaluate(start_dir),
         }
     }
 
@@ -343,5 +427,81 @@ file = "/etc/os-release"
                 panic!("Expected file source");
             }
         });
+    }
+
+    #[test]
+    fn test_state_id_traits_and_nested_config_and_evaluate_scope() {
+        let id = StateId::from("custom".to_string());
+        assert_eq!(id.0.as_str(), "custom");
+        assert_eq!(id.as_ref(), "custom");
+        let borrowed: &str = Borrow::borrow(&id);
+        assert_eq!(borrowed, "custom");
+        assert_eq!(format!("{}", id), "custom");
+
+        let nested_toml = r#"
+[state.git]
+scope = "cwd"
+source = { native = "git" }
+invalidate = { watch = "**/*.rs", ignore = ["target/**", "["], timeout = 5, pwd = false }
+
+[state.nested_cmd]
+source.command = "echo hi"
+invalidate.timeout = 30
+
+[state.nested_file]
+source.file = "VERSION"
+ignore = ["ignored/**"]
+pwd = true
+"#;
+        let mut config: Config = toml::from_str(nested_toml).unwrap();
+        config.inject_implicit_states();
+
+        let git_sc = config.state.get("git").unwrap();
+        assert_eq!(git_sc.scope, Scope::Cwd);
+        assert_eq!(git_sc.invalidate.timeout, Some(5));
+        assert_eq!(git_sc.invalidate.pwd, Some(false));
+        assert!(git_sc.should_watch());
+        assert!(git_sc.ignore_set().is_some());
+
+        let nested_cmd = config.state.get("nested_cmd").unwrap();
+        assert!(!nested_cmd.should_watch());
+        assert_eq!(
+            nested_cmd.evaluate_scope(Path::new("")),
+            None,
+            "empty start_dir must return None"
+        );
+        assert_eq!(
+            nested_cmd.evaluate_scope(Path::new("/home/user/proj")),
+            Some(PathBuf::from("/")),
+            "global non-watch state scopes to /"
+        );
+
+        let nested_file = config.state.get("nested_file").unwrap();
+        assert!(nested_file.should_watch());
+        assert_eq!(
+            nested_file.evaluate_scope(Path::new("/home/user/proj")),
+            Some(PathBuf::from("/home/user/proj")),
+            "global relative file state scopes to start_dir"
+        );
+
+        let abs_file = StateConfig {
+            scope: Scope::Global,
+            source: StateSource::File {
+                file: "/etc/hostname".to_string(),
+            },
+            invalidate: StateInvalidate::default(),
+        };
+        assert_eq!(
+            abs_file.evaluate_scope(Path::new("/home/user/proj")),
+            Some(PathBuf::from("/etc")),
+            "global absolute file state scopes to file parent directory"
+        );
+
+        let missing_source_toml = r#"
+[state.bad]
+timeout = 10
+"#;
+        let err = toml::from_str::<Config>(missing_source_toml).unwrap_err();
+        assert!(err.to_string().contains("missing state source"));
     }
 }

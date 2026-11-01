@@ -679,7 +679,7 @@ mod tests {
         env.wait_for(5, || {
             Ok::<bool, Box<dyn std::error::Error>>(
                 std::fs::read_to_string(&log_path)
-                    .map(|c| c.contains("listening"))
+                    .map(|c| c.contains("Binding to socket"))
                     .unwrap_or(false),
             )
         })?;
@@ -868,7 +868,7 @@ watch = "**/*.txt"
         env.wait_for(5, || {
             Ok::<bool, Box<dyn std::error::Error>>(
                 std::fs::read_to_string(&log_path)
-                    .map(|c| c.contains("listening"))
+                    .map(|c| c.contains("Binding to socket"))
                     .unwrap_or(false),
             )
         })?;
@@ -1235,6 +1235,287 @@ scope = "nearest(.git)"
             "Expected SHBOT_BIN to override dev-bin, got: {}",
             out
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_zsh_payload_percent_encoding_edge_cases() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut env = TestEnv::new()?;
+        let dummy_sock = env.home_dir.path().join("encoding.sock");
+        let listener = UnixListener::bind(&dummy_sock)?;
+
+        let shbot_bin = env.home_dir.path().join("shbot");
+        fs::write(&shbot_bin, "#!/bin/sh\nexit 0\n")?;
+        fs::set_permissions(&shbot_bin, fs::Permissions::from_mode(0o755))?;
+
+        env.send_line(&format!(
+            "export PATH={}:$PATH",
+            env.home_dir.path().display()
+        ))?;
+        env.send_line(&format!("export SHBOT_SOCKET={}", dummy_sock.display()))?;
+        env.source_plugin()?;
+
+        let (mut stream, _) = listener.accept()?;
+        let mut buf = [0u8; 256];
+        let _ = stream.read(&mut buf)?;
+
+        // Send wire payload containing:
+        // - literal "%01" (encoded as "%2501")
+        // - literal "%\x01" (encoded as "%25%01")
+        // - literal "\x01" (encoded as "%01")
+        // - literal "%25" (encoded as "%2525")
+        // - newline (%0A) and unit separator (%1F)
+        stream.write_all(b"update tricky lit:%2501|pct_soh:%25%01|soh:%01|pct25:%2525|nl:%0A|us:%1F\n")?;
+        stream.flush()?;
+
+        env.wait_for_mut(5, |env| {
+            let check = env.send_line(
+                "print -rn -- \"${SHBOT_STATE[tricky]}\" | od -An -tx1 | tr -d ' \\n'; echo",
+            )?;
+            // Expected bytes for "lit:%01|pct_soh:%\x01|soh:\x01|pct25:%25|nl:\n|us:\x1f":
+            // l i t : % 0 1 | p c t _ s o h : % 01 | s o h : 01 | p c t 2 5 : % 2 5 | n l : 0a | u s : 1f
+            Ok::<bool, Box<dyn Error>>(
+                check.contains("6c69743a2530317c7063745f736f683a25017c736f683a017c70637432353a2532357c6e6c3a0a7c75733a1f"),
+            )
+        })?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_custom_states_scopes_and_invalidation_end_to_end() -> Result<(), Box<dyn Error>> {
+        let mut env = TestEnv::new()?;
+
+        let proj_dir = env.home_dir.path().join("proj");
+        let sub_dir = proj_dir.join("sub");
+        fs::create_dir_all(&sub_dir)?;
+        fs::write(proj_dir.join("VERSION"), "1.0.0\n")?;
+        fs::write(sub_dir.join("watched.txt"), "w1\n")?;
+        let counter_path = env.home_dir.path().join("counter.txt");
+        fs::write(&counter_path, "c1\n")?;
+
+        let config_path = env.home_dir.path().join(".config/shbot/shbot.toml");
+        fs::create_dir_all(config_path.parent().unwrap())?;
+        fs::write(
+            &config_path,
+            format!(
+                r#"
+[state.ver]
+scope = "nearest(VERSION)"
+source.file = "VERSION"
+
+[state.watched_cmd]
+scope = "cwd"
+command = "cat watched.txt"
+watch = "watched.txt"
+
+[state.explicit_global]
+scope = "global"
+source.command = "cat {}"
+"#,
+                counter_path.display()
+            ),
+        )?;
+
+        env.start_daemon()?;
+        let shbot_bin = TestEnv::get_shbot_bin_path()?;
+        env.send_line(&format!("export SHBOT_BIN={}", shbot_bin.display()))?;
+        env.source_plugin()?;
+
+        env.send_line(&format!("cd {}", sub_dir.display()))?;
+
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line(
+                "echo \"V=${SHBOT_STATE[ver]}|W=${SHBOT_STATE[watched_cmd]}|E=${SHBOT_STATE[explicit_global]}\"",
+            )?;
+            Ok::<bool, Box<dyn Error>>(out.contains("V=1.0.0|W=w1|E=c1"))
+        })?;
+
+        // Modify VERSION and watched.txt -> file monitor should automatically push updates
+        fs::write(proj_dir.join("VERSION"), "2.0.0\n")?;
+        fs::write(sub_dir.join("watched.txt"), "w2\n")?;
+
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line(
+                "echo \"V=${SHBOT_STATE[ver]}|W=${SHBOT_STATE[watched_cmd]}\"",
+            )?;
+            Ok::<bool, Box<dyn Error>>(out.contains("V=2.0.0|W=w2"))
+        })?;
+
+        // Update counter.txt and send `invalidate explicit_global` -> should re-evaluate and push c2
+        fs::write(&counter_path, "c2\n")?;
+        env.send_line("_shbot_send 'invalidate explicit_global'")?;
+
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("echo \"E=${SHBOT_STATE[explicit_global]}\"")?;
+            Ok::<bool, Box<dyn Error>>(out.contains("E=c2"))
+        })?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_dynamic_config_hot_reload_and_sighup_end_to_end() -> Result<(), Box<dyn Error>> {
+        use std::process::Command;
+
+        let mut env = TestEnv::new()?;
+        let config_path = env.home_dir.path().join(".config/shbot/shbot.toml");
+        fs::create_dir_all(config_path.parent().unwrap())?;
+        fs::write(
+            &config_path,
+            r#"
+[state.initial_state]
+command = "echo init_ok"
+"#,
+        )?;
+
+        env.start_daemon()?;
+        let shbot_bin = TestEnv::get_shbot_bin_path()?;
+        env.send_line(&format!("export SHBOT_BIN={}", shbot_bin.display()))?;
+        env.source_plugin()?;
+
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("echo \"INIT=${SHBOT_STATE[initial_state]}\"")?;
+            Ok::<bool, Box<dyn Error>>(out.contains("INIT=init_ok"))
+        })?;
+
+        // 1. Add a new state and run `shbot reload` without changing directory
+        fs::write(
+            &config_path,
+            r#"
+[state.initial_state]
+command = "echo init_ok"
+
+[state.hot_added]
+command = "echo hot_ok"
+"#,
+        )?;
+        env.wait_for_mut(5, |env| {
+            let reload_out = env.send_line("shbot reload")?;
+            Ok::<bool, Box<dyn Error>>(
+                reload_out.contains("configuration reloaded successfully"),
+            )
+        })?;
+
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("echo \"HOT=${SHBOT_STATE[hot_added]}\"")?;
+            Ok::<bool, Box<dyn Error>>(out.contains("HOT=hot_ok"))
+        })?;
+
+        // 2. Add another state and reload via SIGHUP
+        fs::write(
+            &config_path,
+            r#"
+[state.initial_state]
+command = "echo init_ok"
+
+[state.sighup_added]
+command = "echo sighup_ok"
+"#,
+        )?;
+        let pid = env.daemon_cmd.as_ref().unwrap().id();
+        Command::new("kill")
+            .arg("-HUP")
+            .arg(pid.to_string())
+            .status()?;
+
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("echo \"HUP=${SHBOT_STATE[sighup_added]}\"")?;
+            Ok::<bool, Box<dyn Error>>(out.contains("HUP=sighup_ok"))
+        })?;
+
+        // 3. Invalid TOML on SIGHUP and `shbot reload` must log error and keep daemon alive
+        fs::write(&config_path, "invalid = [toml\n")?;
+        Command::new("kill")
+            .arg("-HUP")
+            .arg(pid.to_string())
+            .status()?;
+        env.wait_for_mut(5, |env| {
+            let bad_reload = env.send_line("shbot reload")?;
+            Ok::<bool, Box<dyn Error>>(bad_reload.contains("error: failed to load config"))
+        })?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_broken_pipe_recovery_and_version_auto_upgrade() -> Result<(), Box<dyn Error>> {
+        use std::process::Command;
+        use std::thread;
+
+        let mut env = TestEnv::new()?;
+        env.start_daemon()?;
+        let old_pid = env.daemon_cmd.as_ref().unwrap().id();
+
+        let shbot_bin = TestEnv::get_shbot_bin_path()?;
+        env.send_line(&format!("export SHBOT_BIN={}", shbot_bin.display()))?;
+        env.source_plugin()?;
+
+        // 1. Kill the daemon so the Zsh client's socket FD becomes a broken pipe,
+        //    then start a fresh daemon and verify the Zsh plugin detects the broken pipe
+        //    on _shbot_send, resets SHBOT_FD=0, and reconnects on the next prompt!
+        env.kill_daemon();
+
+        let repo_path = env.setup_git_repo("reconnect_repo")?;
+        fs::write(repo_path.join("a.txt"), "hi")?;
+
+        env.start_daemon()?;
+        let new_pid = env.daemon_cmd.as_ref().unwrap().id();
+        assert_ne!(old_pid, new_pid);
+
+        // First command triggers _shbot_send on the dead FD (cleaning it up) and/or precmd reconnect
+        env.send_line(&format!("cd {}", repo_path.display()))?;
+        env.send_line("")?;
+
+        env.wait_for_mut(5, |env| {
+            let out = env.send_line("echo \"GIT=${SHBOT_STATE[git]}\"")?;
+            Ok::<bool, Box<dyn Error>>(out.contains("reconnect_repo"))
+        })?;
+
+        // 2. Kill the current daemon, bind a mock older daemon (v0.1.0) on the socket,
+        //    and run `shbot --log-file <file> connect` to verify auto-upgrade and custom log file!
+        env.kill_daemon();
+        let socket_path = env
+            .home_dir
+            .path()
+            .join(format!(".local/state/shbot/{}.socket", env.host));
+        let _ = fs::remove_file(&socket_path);
+        let mock_old_listener = UnixListener::bind(&socket_path)?;
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = mock_old_listener.accept() {
+                let mut buf = [0u8; 64];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"shbot daemon status:\n  Daemon Version: 0.1.0\n");
+            }
+        });
+
+        let custom_log = env.home_dir.path().join("upgrade.log");
+        let status = Command::new(&shbot_bin)
+            .args(["--log-file", custom_log.to_str().unwrap(), "connect"])
+            .env("HOME", env.home_dir.path())
+            .env("HOST", &env.host)
+            .env("RUST_LOG", "info")
+            .status()?;
+        assert!(
+            status.success(),
+            "connect upgrading older daemon should succeed"
+        );
+        assert!(custom_log.exists(), "--log-file should create the log file");
+
+        env.wait_for(5, || {
+            let out = Command::new(&shbot_bin)
+                .arg("status")
+                .env("HOME", env.home_dir.path())
+                .env("HOST", &env.host)
+                .output()?;
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            Ok::<bool, Box<dyn Error>>(
+                stdout.contains("Daemon Version:") && !stdout.contains("0.1.0"),
+            )
+        })?;
 
         Ok(())
     }

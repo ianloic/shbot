@@ -138,18 +138,25 @@ fn handle_daemon() -> Result<()> {
     rt.block_on(async {
         info!("Async runtime initialized!");
         let state = state::DaemonState::new();
+        let watcher = watcher::SyncWatcher::new();
 
         let (config_tx, config_rx) = tokio::sync::watch::channel(config);
 
         let sighup_tx = config_tx.clone();
+        let sighup_state = state.clone();
+        let sighup_watcher = watcher.clone();
         tokio::spawn(async move {
             use tokio::signal::unix::{SignalKind, signal};
             if let Ok(mut sig) = signal(SignalKind::hangup()) {
                 while let Some(_) = sig.recv().await {
                     info!("Received SIGHUP, reloading configuration");
                     if let Ok(new_config) = config::Config::load() {
-                        if let Err(e) = sighup_tx.send(new_config) {
+                        if let Err(e) = sighup_tx.send(new_config.clone()) {
                             error!("Failed to broadcast config on SIGHUP: {}", e);
+                        } else {
+                            sighup_state
+                                .handle_config_reload(sighup_watcher.clone(), &new_config)
+                                .await;
                         }
                     } else {
                         error!("Failed to parse shbot.toml config on SIGHUP");
@@ -172,7 +179,6 @@ fn handle_daemon() -> Result<()> {
 
         runner::start_timeout_tasks(state.clone(), config_rx.clone());
 
-        let watcher = watcher::SyncWatcher::new();
         if let Err(e) = watcher.start(state.clone(), config_rx.clone()) {
             error!("Failed to start SyncWatcher: {}", e);
         }
@@ -417,6 +423,17 @@ mod tests {
             let path = get_socket_path().unwrap();
             assert_eq!(path, PathBuf::from("/tmp/explicit.socket"));
         });
+
+        temp_env::with_vars(
+            [("HOST", None::<&str>), ("HOSTNAME", Some("env_hostname"))],
+            || {
+                assert_eq!(get_hostname(), "env_hostname");
+            },
+        );
+
+        temp_env::with_vars([("HOST", None::<&str>), ("HOSTNAME", None::<&str>)], || {
+            assert!(!get_hostname().is_empty());
+        });
     }
 
     #[test]
@@ -437,6 +454,16 @@ mod tests {
                 assert!(handle_status().is_ok());
                 assert!(handle_reload().is_ok());
                 assert!(handle_loglevel("debug").is_ok());
+
+                // Stale socket file on disk with no listener -> returns Err
+                {
+                    let stale = StdUnixListener::bind(&socket_path).unwrap();
+                    drop(stale);
+                }
+                assert!(handle_status().is_err());
+                assert!(handle_reload().is_err());
+                assert!(handle_loglevel("debug").is_err());
+                let _ = fs::remove_file(&socket_path);
 
                 // Now mock the daemon
                 let listener = StdUnixListener::bind(&socket_path).unwrap();
@@ -473,6 +500,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let socket_path = dir.path().join("test.socket");
+        assert_eq!(check_running_daemon(&socket_path, "0.2.0"), (false, None));
+
         let listener = StdUnixListener::bind(&socket_path).unwrap();
 
         thread::spawn(move || {
@@ -481,6 +510,7 @@ mod tests {
                 "shbot daemon status:\n  Daemon Version: 0.1.0\n  Daemon PID: 4243\n",
                 "shbot daemon status:\n  Daemon Version: 0.2.0\n  Daemon PID: 4244\n",
                 "shbot daemon status:\n  Daemon Version: 0.3.0\n  Daemon PID: 4245\n",
+                "shbot daemon status:\n  Daemon Version: custom-ver\n  Daemon PID: 4246\n",
             ];
             for resp in responses {
                 if let Ok((mut stream, _)) = listener.accept() {
@@ -516,6 +546,11 @@ mod tests {
         assert_eq!(
             check_running_daemon(&socket_path, "0.2.0"),
             (true, Some(4245))
+        );
+        // Non-semver exact string match fallback
+        assert_eq!(
+            check_running_daemon(&socket_path, "custom-ver"),
+            (true, Some(4246))
         );
     }
 }

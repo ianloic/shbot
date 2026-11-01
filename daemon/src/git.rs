@@ -1237,4 +1237,62 @@ mod tests {
         assert_eq!(state.num_skip_worktree, 1);
         assert_eq!(state.num_assume_unchanged, 1);
     }
+
+    #[test]
+    fn test_git_intent_to_add_cache_eviction_and_corrupt_head() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        run_git(&["init", "--initial-branch=main"], root);
+        run_git(&["config", "user.name", "Test User"], root);
+        run_git(&["config", "user.email", "test@example.com"], root);
+
+        fs::write(root.join("base.txt"), "base").unwrap();
+        run_git(&["add", "base.txt"], root);
+        run_git(&["commit", "-m", "initial"], root);
+
+        // 1. Test `git add -N` (IntentToAdd)
+        fs::write(root.join("intent.txt"), "intent content").unwrap();
+        run_git(&["add", "-N", "intent.txt"], root);
+        let (_, state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(state.index_size, 2);
+
+        // 2. Test AHEAD_BEHIND_CACHE eviction at MAX_AHEAD_BEHIND_CACHE_ENTRIES (256)
+        fs::write(root.join("base.txt"), "second").unwrap();
+        run_git(&["add", "base.txt"], root);
+        run_git(&["commit", "-m", "second"], root);
+
+        let repo = gix::open(root).unwrap();
+        let head_id = repo.head_id().unwrap().detach();
+        let parent_id = repo
+            .find_commit(head_id)
+            .unwrap()
+            .ancestors()
+            .all()
+            .unwrap()
+            .nth(1)
+            .unwrap()
+            .unwrap()
+            .id;
+
+        {
+            let mut cache = AHEAD_BEHIND_CACHE.lock().unwrap();
+            cache.clear();
+            for i in 0..MAX_AHEAD_BEHIND_CACHE_ENTRIES {
+                let mut bytes = [0u8; 20];
+                bytes[0] = (i & 0xFF) as u8;
+                bytes[1] = ((i >> 8) & 0xFF) as u8;
+                let dummy = ObjectId::from_bytes_or_panic(&bytes);
+                cache.insert((dummy, parent_id), (1, 1));
+            }
+            assert_eq!(cache.len(), MAX_AHEAD_BEHIND_CACHE_ENTRIES);
+        }
+        let ab = ahead_behind(&repo, head_id, parent_id);
+        assert_eq!(ab, Some((1, 0)));
+        assert_eq!(AHEAD_BEHIND_CACHE.lock().unwrap().len(), 1);
+
+        // 3. Test corrupt .git/HEAD fallback to "main"
+        fs::write(root.join(".git/HEAD"), "not a valid ref\n").unwrap();
+        let (_, corrupt_state) = get_git_state(root).unwrap().unwrap();
+        assert_eq!(corrupt_state.local_branch, "main");
+    }
 }

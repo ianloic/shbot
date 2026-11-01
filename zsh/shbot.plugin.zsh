@@ -424,8 +424,11 @@ function _shbot_send() {
 		return 1
 	fi
 	[[ -n "$SHBOT_DEBUG" ]] && _shbot_debug "Sending command: $1"
-	if ! syswrite -o $SHBOT_FD "$1"$'\n'; then
+	if ! syswrite -o $SHBOT_FD "$1"$'\n' 2>/dev/null; then
 		[[ -n "$SHBOT_DEBUG" ]] && _shbot_debug "Write failed: $1"
+		zle -F $SHBOT_FD 2>/dev/null
+		exec {SHBOT_FD}<&- 2>/dev/null
+		SHBOT_FD=0
 		return 1
 	fi
 }
@@ -504,13 +507,15 @@ function _shbot_read_handler() {
 				payload="${rest#* }"
 			fi
 			if [[ "$payload" == *%* ]]; then
-				payload="${payload//'%25'/$marker}"
-				payload="${payload//'%0A'/$nl}"
-				payload="${payload//'%0D'/$cr}"
-				payload="${payload//'%1F'/$us}"
-				payload="${payload//'%00'/}"
-				payload="${payload//"$marker"/%}"
-				payload="${payload//'%01'/$marker}"
+				payload="${payload//"$marker"/${marker}A}"
+				payload="${payload//\%25/${marker}P}"
+				payload="${payload//\%01/${marker}A}"
+				payload="${payload//\%0A/$nl}"
+				payload="${payload//\%0D/$cr}"
+				payload="${payload//\%1F/$us}"
+				payload="${payload//\%00/}"
+				payload="${payload//"${marker}P"/%}"
+				payload="${payload//"${marker}A"/$marker}"
 			fi
 			SHBOT_STATE[$state_id]="$payload"
 			[[ -n "$SHBOT_DEBUG" ]] && _shbot_debug "Updated state: $state_id = $payload"

@@ -161,7 +161,9 @@ mod tests {
 
         assert!(Scope::from_str("unknown").is_err());
         assert!(Scope::from_str("nearest()").is_err());
+        assert!(Scope::from_str("nearest(.git").is_err());
         assert!(Scope::from_str("topmost(   )").is_err());
+        assert!(Scope::from_str("topmost(.git").is_err());
     }
 
     #[test]

@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use crate::config::{Config, StateId};
+use crate::config::{Config, StateId, StateSource};
 use crate::protocol::format_update_message;
 use crate::runner::evaluate_scoped_state;
 use crate::watcher::SyncWatcher;
@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 #[cfg(test)]
 use tokio::sync::broadcast;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc, watch};
 use tracing::debug;
 #[cfg(test)]
 use tracing::info;
@@ -43,6 +43,26 @@ pub struct ClientInfo {
 pub struct ScopedState {
     pub subscribers: RwLock<HashSet<Pid>>,
     pub last_value: RwLock<Option<String>>,
+    pub cancel_tx: watch::Sender<bool>,
+}
+
+impl ScopedState {
+    pub fn new(subscribers: HashSet<Pid>) -> Arc<Self> {
+        let (cancel_tx, _) = watch::channel(false);
+        Arc::new(Self {
+            subscribers: RwLock::new(subscribers),
+            last_value: RwLock::new(None),
+            cancel_tx,
+        })
+    }
+
+    pub fn subscribe_cancel(&self) -> watch::Receiver<bool> {
+        self.cancel_tx.subscribe()
+    }
+
+    pub fn cancel(&self) {
+        let _ = self.cancel_tx.send(true);
+    }
 }
 
 pub struct DaemonState {
@@ -93,7 +113,6 @@ impl DaemonState {
         false
     }
 
-    #[cfg(test)]
     pub async fn end_evaluation(&self, name: &StateId, root: &Path) {
         self.in_flight
             .write()
@@ -233,7 +252,11 @@ impl DaemonState {
         {
             let scoped_states = self.scoped_states.read().await;
             for (key, state) in scoped_states.iter() {
-                if query == "*" || query == "all" || key.0.0 == query {
+                if query == "*"
+                    || query == "all"
+                    || key.0.0 == query
+                    || key.1.to_string_lossy() == query
+                {
                     *state.last_value.write().await = None;
                 }
             }
@@ -245,8 +268,26 @@ impl DaemonState {
         }
     }
 
+    pub async fn handle_config_reload(
+        self: &Arc<Self>,
+        watcher: Arc<SyncWatcher>,
+        config: &Config,
+    ) {
+        let client_cwds: Vec<(Pid, PathBuf)> = {
+            let clients = self.clients.read().await;
+            clients
+                .iter()
+                .filter(|(_, info)| !info.cwd.as_os_str().is_empty())
+                .map(|(&pid, info)| (pid, info.cwd.clone()))
+                .collect()
+        };
+        for (pid, cwd) in client_cwds {
+            self.handle_cd(pid, cwd, watcher.clone(), config).await;
+        }
+    }
+
     pub async fn handle_cd(
-        &self,
+        self: &Arc<Self>,
         pid: Pid,
         path: PathBuf,
         watcher: Arc<SyncWatcher>,
@@ -257,7 +298,7 @@ impl DaemonState {
 
         let mut new_scopes = HashSet::new();
         for (name, state_config) in &config.state {
-            if let Some(root) = state_config.scope.evaluate(&path) {
+            if let Some(root) = state_config.evaluate_scope(&path) {
                 new_scopes.insert((name.clone(), root));
             }
         }
@@ -289,10 +330,7 @@ impl DaemonState {
             for key in to_add {
                 let state = scoped_states.entry(key.clone()).or_insert_with(|| {
                     newly_created_scopes.push(key.clone());
-                    Arc::new(ScopedState {
-                        subscribers: RwLock::new(HashSet::new()),
-                        last_value: RwLock::new(None),
-                    })
+                    ScopedState::new(HashSet::new())
                 });
                 state.subscribers.write().await.insert(pid);
 
@@ -312,10 +350,11 @@ impl DaemonState {
                     }
                 }
                 if is_orphaned {
-                    scoped_states.remove(&key);
+                    if let Some(removed) = scoped_states.remove(&key) {
+                        removed.cancel();
+                    }
                     if let Some(state_config) = config.state.get(&key.0)
-                        && (state_config.invalidate.watch.is_some()
-                            || state_config.invalidate.pwd.unwrap_or(false))
+                        && state_config.should_watch()
                     {
                         // Check if any OTHER active state is using this target before unwatching
                         let target = &key.1;
@@ -323,8 +362,7 @@ impl DaemonState {
                         for (other_key, _) in scoped_states.iter() {
                             if other_key.1 == *target
                                 && let Some(sc) = config.state.get(&other_key.0)
-                                && (sc.invalidate.watch.is_some()
-                                    || sc.invalidate.pwd.unwrap_or(false))
+                                && sc.should_watch()
                             {
                                 keep = true;
                                 break;
@@ -374,8 +412,7 @@ impl DaemonState {
         // even if the scope already existed when this client entered.
         for key in &new_scopes {
             if let Some(state_config) = config.state.get(&key.0)
-                && (state_config.invalidate.watch.is_some()
-                    || state_config.invalidate.pwd.unwrap_or(false))
+                && state_config.should_watch()
                 && !watcher.is_watching(&key.1)
             {
                 let watcher_clone = watcher.clone();
@@ -390,13 +427,26 @@ impl DaemonState {
 
         // For newly created scopes, trigger initial evaluation immediately
         for key in newly_created_scopes {
-            if config.state.contains_key(&key.0) {
-                let start_trigger = Instant::now();
-                evaluate_scoped_state(&key.0, &key.1, self, config).await;
-                self.last_trigger_refresh_micros.store(
-                    start_trigger.elapsed().as_micros() as u64,
-                    Ordering::Relaxed,
-                );
+            if let Some(state_config) = config.state.get(&key.0) {
+                if matches!(state_config.source, StateSource::Command { .. }) {
+                    let state_clone = Arc::clone(self);
+                    let config_clone = config.clone();
+                    tokio::spawn(async move {
+                        let start_trigger = Instant::now();
+                        evaluate_scoped_state(&key.0, &key.1, &state_clone, &config_clone).await;
+                        state_clone.last_trigger_refresh_micros.store(
+                            start_trigger.elapsed().as_micros() as u64,
+                            Ordering::Relaxed,
+                        );
+                    });
+                } else {
+                    let start_trigger = Instant::now();
+                    evaluate_scoped_state(&key.0, &key.1, self, config).await;
+                    self.last_trigger_refresh_micros.store(
+                        start_trigger.elapsed().as_micros() as u64,
+                        Ordering::Relaxed,
+                    );
+                }
             }
         }
     }
@@ -406,7 +456,7 @@ impl DaemonState {
         for (other_key, _) in scoped_states.iter() {
             if other_key.1 == target
                 && let Some(sc) = config.state.get(&other_key.0)
-                && (sc.invalidate.watch.is_some() || sc.invalidate.pwd.unwrap_or(false))
+                && sc.should_watch()
             {
                 return true;
             }
@@ -444,18 +494,18 @@ impl DaemonState {
                     }
                 }
                 if is_orphaned {
-                    scoped_states.remove(&key);
+                    if let Some(removed) = scoped_states.remove(&key) {
+                        removed.cancel();
+                    }
                     if let Some(state_config) = config.state.get(&key.0)
-                        && (state_config.invalidate.watch.is_some()
-                            || state_config.invalidate.pwd.unwrap_or(false))
+                        && state_config.should_watch()
                     {
                         let target = &key.1;
                         let mut keep = false;
                         for (other_key, _) in scoped_states.iter() {
                             if other_key.1 == *target
                                 && let Some(sc) = config.state.get(&other_key.0)
-                                && (sc.invalidate.watch.is_some()
-                                    || sc.invalidate.pwd.unwrap_or(false))
+                                && sc.should_watch()
                             {
                                 keep = true;
                                 break;
@@ -561,19 +611,14 @@ mod tests {
         state.add_client(1, path.clone(), tx).await;
 
         // manually set up a scoped state
-        state.scoped_states.write().await.insert(
-            (StateId::git(), path.clone()),
-            Arc::new(ScopedState {
-                subscribers: RwLock::new([1].into()),
-                last_value: RwLock::new(None),
-            }),
-        );
+        state
+            .scoped_states
+            .write()
+            .await
+            .insert((StateId::git(), path.clone()), ScopedState::new([1].into()));
         state.scoped_states.write().await.insert(
             (StateId::from("other"), path.clone()),
-            Arc::new(ScopedState {
-                subscribers: RwLock::new([1].into()),
-                last_value: RwLock::new(None),
-            }),
+            ScopedState::new([1].into()),
         );
 
         // 1. Initial send
@@ -636,10 +681,7 @@ mod tests {
         state.add_client(1, path.clone(), tx).await;
         state.scoped_states.write().await.insert(
             (StateId::from("inj"), path.clone()),
-            Arc::new(ScopedState {
-                subscribers: RwLock::new([1].into()),
-                last_value: RwLock::new(None),
-            }),
+            ScopedState::new([1].into()),
         );
 
         state
@@ -740,5 +782,174 @@ mod tests {
             .try_recv()
             .expect("Expected git state update on re-entering repo");
         assert_eq!(msg_reenter, msg_in_repo);
+    }
+
+    #[tokio::test]
+    async fn test_status_dump_with_clients_and_active_scopes() {
+        use crate::config::{StateConfig, StateInvalidate};
+        use crate::scope::Scope;
+
+        let state = DaemonState::new();
+        let (tx, _rx) = mpsc::channel(10);
+        let path = PathBuf::from("/tmp/repo");
+
+        state.add_client(101, path.clone(), tx.clone()).await;
+        state.add_client(202, path.clone(), tx).await;
+
+        let active_scope = ScopedState::new([101, 202].into());
+        *active_scope.last_value.write().await = Some("main".to_string());
+        state
+            .scoped_states
+            .write()
+            .await
+            .insert((StateId::git(), path.clone()), active_scope);
+
+        let empty_scope = ScopedState::new(HashSet::new());
+        state
+            .scoped_states
+            .write()
+            .await
+            .insert((StateId::from("orphan"), path.clone()), empty_scope);
+
+        state
+            .update_scoped_state(&StateId::git(), &path, "main_updated")
+            .await;
+
+        let mut config = Config::default();
+        config.state.insert(
+            StateId::from("orphan"),
+            StateConfig {
+                scope: Scope::Cwd,
+                source: StateSource::Command {
+                    command: "echo orphan".to_string(),
+                },
+                invalidate: StateInvalidate::default(),
+            },
+        );
+        let dump = state.get_status_dump(1, &config).await;
+        assert!(dump.contains("- PID: 101"));
+        assert!(dump.contains("Cached States: 1"));
+        assert!(dump.contains("- git"));
+        assert!(dump.contains("Subscribers: [101, 202]"));
+        assert!(dump.contains("Subscribers: none"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_cd_initial_payloads_and_shared_watch_across_states_and_reload() {
+        use crate::config::{StateConfig, StateInvalidate};
+        use crate::scope::Scope;
+        use tokio::sync::watch;
+
+        let state = DaemonState::new();
+        let watcher = SyncWatcher::new();
+        let dir = tempdir().unwrap();
+        let sub_dir = dir.path().join("sub");
+        let outside_dir = dir.path().join("outside");
+        fs::create_dir_all(&sub_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+        fs::write(dir.path().join(".marker_a"), "").unwrap();
+        fs::write(dir.path().join(".marker_b"), "val_b").unwrap();
+
+        let mut config = Config::default();
+        config.state.remove("git");
+        config.state.insert(
+            StateId::from("state_a"),
+            StateConfig {
+                scope: Scope::Nearest(vec![".marker_a".to_string()]),
+                source: StateSource::File {
+                    file: ".marker_b".to_string(),
+                },
+                invalidate: StateInvalidate::default(),
+            },
+        );
+        config.state.insert(
+            StateId::from("state_b"),
+            StateConfig {
+                scope: Scope::Topmost(vec![".marker_b".to_string()]),
+                source: StateSource::File {
+                    file: ".marker_b".to_string(),
+                },
+                invalidate: StateInvalidate::default(),
+            },
+        );
+        config.inject_implicit_states();
+        config.state.remove("git");
+
+        let (_config_tx, config_rx) = watch::channel(config.clone());
+        watcher.start(state.clone(), config_rx).unwrap();
+
+        let (tx1, mut rx1) = mpsc::channel(10);
+        let (tx2, mut rx2) = mpsc::channel(10);
+        state.add_client(1, PathBuf::new(), tx1).await;
+        state.add_client(2, PathBuf::new(), tx2).await;
+
+        // Client 1 enters sub_dir -> creates both state_a and state_b on dir.path()
+        state
+            .handle_cd(1, sub_dir.clone(), watcher.clone(), &config)
+            .await;
+        let msg1 = rx1.try_recv().unwrap();
+        let msg2 = rx1.try_recv().unwrap();
+        assert!(msg1.contains("val_b") && msg2.contains("val_b"));
+        assert!(watcher.is_watching(dir.path()));
+
+        // Client 2 enters sub_dir -> scopes already exist with cached last_value, so initial_payloads are sent immediately
+        state
+            .handle_cd(2, sub_dir.clone(), watcher.clone(), &config)
+            .await;
+        let c2_msg1 = rx2.try_recv().unwrap();
+        let c2_msg2 = rx2.try_recv().unwrap();
+        assert!(c2_msg1.contains("val_b") && c2_msg2.contains("val_b"));
+
+        // Now add a nested .marker_a in sub_dir so state_a moves to sub_dir while state_b stays on dir.path()
+        fs::write(sub_dir.join(".marker_a"), "").unwrap();
+        fs::write(sub_dir.join(".marker_b"), "sub_val").unwrap();
+
+        // Client 2 disconnects from sub_dir first so Client 1 is the sole subscriber on dir.path()
+        state
+            .handle_client_disconnect(2, watcher.clone(), &config)
+            .await;
+        assert!(watcher.is_watching(dir.path()));
+
+        // Client 1 re-cds into sub_dir: state_a on dir.path() is orphaned and removed,
+        // but state_b on dir.path() is still active so dir.path() MUST stay watched!
+        state
+            .handle_cd(1, sub_dir.clone(), watcher.clone(), &config)
+            .await;
+        assert!(
+            watcher.is_watching(dir.path()),
+            "dir.path() must remain watched because state_b still uses it"
+        );
+
+        // Now test handle_config_reload adding a new state for connected client 1
+        let mut reloaded_config = config.clone();
+        reloaded_config.state.insert(
+            StateId::from("reloaded_file"),
+            StateConfig {
+                scope: Scope::Cwd,
+                source: StateSource::File {
+                    file: ".marker_b".to_string(),
+                },
+                invalidate: StateInvalidate::default(),
+            },
+        );
+        state
+            .handle_config_reload(watcher.clone(), &reloaded_config)
+            .await;
+        let mut found_reloaded = false;
+        while let Ok(msg) = rx1.try_recv() {
+            if msg.starts_with("update reloaded_file sub_val") {
+                found_reloaded = true;
+            }
+        }
+        assert!(
+            found_reloaded,
+            "handle_config_reload must evaluate newly added states for active clients"
+        );
+
+        // Finally disconnect client 1 and verify watches are cleaned up
+        state
+            .handle_client_disconnect(1, watcher.clone(), &reloaded_config)
+            .await;
+        assert_eq!(watcher.get_watch_count(), 0);
     }
 }

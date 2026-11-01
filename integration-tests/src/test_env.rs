@@ -14,8 +14,15 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use rexpect::session::{PtySession, spawn};
+use std::env;
+use std::error::Error;
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{self, Child, Command};
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 pub struct TestEnv {
@@ -26,7 +33,7 @@ pub struct TestEnv {
 }
 
 impl TestEnv {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new() -> Result<Self, Box<dyn Error>> {
         let home_dir = tempfile::tempdir()?;
         let host = "test_host".to_string();
 
@@ -46,12 +53,11 @@ impl TestEnv {
         })
     }
 
-    pub fn get_shbot_bin_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let shbot_bin = std::env::var("SHBOT_BIN_PATH")
+    pub fn get_shbot_bin_path() -> Result<PathBuf, Box<dyn Error>> {
+        let shbot_bin = env::var("SHBOT_BIN_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
-                let mut path =
-                    std::env::current_exe().expect("Failed to get current executable path");
+                let mut path = env::current_exe().expect("Failed to get current executable path");
                 path.pop();
                 path.pop();
                 path.push("shbot");
@@ -65,15 +71,15 @@ impl TestEnv {
         }
     }
 
-    pub fn start_daemon(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn start_daemon(&mut self) -> Result<(), Box<dyn Error>> {
         let shbot_bin = Self::get_shbot_bin_path()?;
 
         let log_path = self
             .home_dir
             .path()
             .join(format!(".local/state/shbot/{}.log", self.host));
-        std::fs::create_dir_all(log_path.parent().unwrap())?;
-        let log_file = std::fs::File::create(&log_path)?;
+        fs::create_dir_all(log_path.parent().unwrap())?;
+        let log_file = File::create(&log_path)?;
         let log_file_err = log_file.try_clone()?;
 
         let daemon_cmd = Command::new(shbot_bin)
@@ -91,9 +97,7 @@ impl TestEnv {
             .home_dir
             .path()
             .join(format!(".local/state/shbot/{}.socket", self.host));
-        self.wait_for(60, || {
-            Ok::<bool, Box<dyn std::error::Error>>(socket_path.exists())
-        })?;
+        self.wait_for(60, || Ok::<bool, Box<dyn Error>>(socket_path.exists()))?;
         if !socket_path.exists() {
             self.kill_daemon();
             return Err(format!("Daemon socket was not created at {:?}", socket_path).into());
@@ -102,7 +106,7 @@ impl TestEnv {
         Ok(())
     }
 
-    pub fn start_connect(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn start_connect(&mut self) -> Result<(), Box<dyn Error>> {
         let shbot_bin = Self::get_shbot_bin_path()?;
 
         let status = Command::new(shbot_bin)
@@ -120,9 +124,7 @@ impl TestEnv {
             .home_dir
             .path()
             .join(format!(".local/state/shbot/{}.socket", self.host));
-        self.wait_for(60, || {
-            Ok::<bool, Box<dyn std::error::Error>>(socket_path.exists())
-        })?;
+        self.wait_for(60, || Ok::<bool, Box<dyn Error>>(socket_path.exists()))?;
         if !socket_path.exists() {
             return Err(format!("Daemon socket was not created at {:?}", socket_path).into());
         }
@@ -138,6 +140,38 @@ impl TestEnv {
                 .arg(pid.to_string())
                 .status();
             let _ = cmd.wait(); // Wait for the process to exit and flush coverage
+        } else {
+            let socket_path = self
+                .home_dir
+                .path()
+                .join(format!(".local/state/shbot/{}.socket", self.host));
+            if let Ok(mut stream) = UnixStream::connect(&socket_path) {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                if stream.write_all(b"status\n").is_ok() {
+                    let mut resp = String::new();
+                    let _ = stream.read_to_string(&mut resp);
+                    for line in resp.lines() {
+                        if let Some(rest) = line.trim().strip_prefix("Daemon PID:")
+                            && let Ok(pid) = rest.trim().parse::<u32>()
+                        {
+                            let _ = Command::new("kill")
+                                .arg("-TERM")
+                                .arg(pid.to_string())
+                                .status();
+                            for _ in 0..40 {
+                                let status = Command::new("kill")
+                                    .arg("-0")
+                                    .arg(pid.to_string())
+                                    .status();
+                                if !status.is_ok_and(|s| s.success()) {
+                                    break;
+                                }
+                                thread::sleep(Duration::from_millis(25));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -152,8 +186,8 @@ impl TestEnv {
         }
     }
 
-    pub fn source_plugin(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let pwd = std::env::current_dir()?;
+    pub fn source_plugin(&mut self) -> Result<(), Box<dyn Error>> {
+        let pwd = env::current_dir()?;
         let plugin_path = pwd.parent().unwrap().join("zsh").join("shbot.plugin.zsh");
         self.send_line(&format!("source {}", plugin_path.display()))?;
 
@@ -163,9 +197,9 @@ impl TestEnv {
         Ok(())
     }
 
-    pub fn setup_git_repo(&self, repo_name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    pub fn setup_git_repo(&self, repo_name: &str) -> Result<PathBuf, Box<dyn Error>> {
         let repo_path = self.home_dir.path().join(repo_name);
-        std::fs::create_dir(&repo_path)?;
+        fs::create_dir(&repo_path)?;
         Command::new("git")
             .arg("init")
             .current_dir(&repo_path)
@@ -183,7 +217,7 @@ impl TestEnv {
         Ok(repo_path)
     }
 
-    pub fn send_line(&mut self, line: &str) -> Result<String, Box<dyn std::error::Error>> {
+    pub fn send_line(&mut self, line: &str) -> Result<String, Box<dyn Error>> {
         self.pty.send_line(line)?;
         let out = self.pty.exp_string("> ")?;
         Ok(out)
@@ -192,48 +226,60 @@ impl TestEnv {
     pub fn wait_for<F, E>(&self, timeout_secs: u64, mut condition: F) -> Result<(), E>
     where
         F: FnMut() -> Result<bool, E>,
+        E: From<String>,
     {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         loop {
             if condition()? {
                 return Ok(());
             }
             if start.elapsed().as_secs() > timeout_secs {
-                return Ok(());
+                return Err(E::from(format!(
+                    "Timed out after {}s waiting for condition",
+                    timeout_secs
+                )));
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(50));
         }
     }
 
     pub fn wait_for_ref<F, E>(&self, timeout_secs: u64, mut condition: F) -> Result<(), E>
     where
         F: FnMut(&Self) -> Result<bool, E>,
+        E: From<String>,
     {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         loop {
             if condition(self)? {
                 return Ok(());
             }
             if start.elapsed().as_secs() > timeout_secs {
-                return Ok(());
+                return Err(E::from(format!(
+                    "Timed out after {}s waiting for condition",
+                    timeout_secs
+                )));
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(50));
         }
     }
 
     pub fn wait_for_mut<F, E>(&mut self, timeout_secs: u64, mut condition: F) -> Result<(), E>
     where
         F: FnMut(&mut Self) -> Result<bool, E>,
+        E: From<String>,
     {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         loop {
             if condition(self)? {
                 return Ok(());
             }
             if start.elapsed().as_secs() > timeout_secs {
-                return Ok(());
+                return Err(E::from(format!(
+                    "Timed out after {}s waiting for condition",
+                    timeout_secs
+                )));
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(50));
         }
     }
 }
@@ -244,9 +290,9 @@ impl Drop for TestEnv {
         // Clean up zsh process
         let _ = self.pty.send_line("exit");
         // Force kill any remaining children of this test
-        let _ = std::process::Command::new("pkill")
+        let _ = Command::new("pkill")
             .arg("-P")
-            .arg(std::process::id().to_string())
+            .arg(process::id().to_string())
             .status();
     }
 }

@@ -108,7 +108,12 @@ mod tests {
         let err4 = ShbotError::TomlSerDe(toml_err);
         assert!(err4.to_string().starts_with("TOML parse error:"));
 
-        // We can't easily construct a TracingSub error, so we skip it or mock it if possible
+        let _ = tracing::subscriber::set_global_default(tracing::subscriber::NoSubscriber::new());
+        let tracing_err =
+            tracing::subscriber::set_global_default(tracing::subscriber::NoSubscriber::new())
+                .unwrap_err();
+        let err5: ShbotError = tracing_err.into();
+        assert!(err5.to_string().starts_with("Tracing error:"));
     }
 
     #[test]

@@ -16,12 +16,14 @@
 use crate::config::{Config, StateId, StateSource};
 use crate::git::get_git_state;
 use crate::state::DaemonState;
+use std::future::pending;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::sync::watch;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
@@ -54,11 +56,30 @@ where
     buf
 }
 
-async fn run_command(command: &str, cwd: &Path, timeout: Duration) -> Option<String> {
+async fn kill_child_group(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        let _ = Command::new("kill")
+            .args(["-KILL", &format!("-{}", pid)])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
+    let _ = child.kill().await;
+}
+
+async fn run_command(
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    mut cancel_rx: Option<watch::Receiver<bool>>,
+) -> Option<String> {
     let mut child = match Command::new("sh")
         .arg("-c")
         .arg(command)
         .current_dir(cwd)
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -75,14 +96,35 @@ async fn run_command(command: &str, cwd: &Path, timeout: Duration) -> Option<Str
     let stdout_handle = child.stdout.take().map(|p| tokio::spawn(read_capped(p)));
     let stderr_handle = child.stderr.take().map(|p| tokio::spawn(read_capped(p)));
 
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(status) => status,
-        Err(_) => {
-            warn!(
-                "Command '{}' timed out after {:?}; killing",
-                command, timeout
-            );
-            let _ = child.kill().await;
+    let wait_future = tokio::time::timeout(timeout, child.wait());
+    let status = tokio::select! {
+        res = wait_future => match res {
+            Ok(status) => status,
+            Err(_) => {
+                warn!(
+                    "Command '{}' timed out after {:?}; killing",
+                    command, timeout
+                );
+                kill_child_group(&mut child).await;
+                if let Some(handle) = stdout_handle {
+                    handle.abort();
+                }
+                if let Some(handle) = stderr_handle {
+                    handle.abort();
+                }
+                return None;
+            }
+        },
+        _ = async {
+            match &mut cancel_rx {
+                Some(rx) => {
+                    let _ = rx.wait_for(|&cancelled| cancelled).await;
+                }
+                None => pending::<()>().await,
+            }
+        } => {
+            debug!("Command '{}' cancelled because scope became orphaned; killing", command);
+            kill_child_group(&mut child).await;
             if let Some(handle) = stdout_handle {
                 handle.abort();
             }
@@ -138,6 +180,7 @@ pub async fn evaluate_state_source(
     cwd: &Path,
     state: &DaemonState,
     command_timeout: Duration,
+    cancel_rx: Option<watch::Receiver<bool>>,
 ) -> Option<String> {
     match source {
         StateSource::File { file } => {
@@ -155,7 +198,9 @@ pub async fn evaluate_state_source(
                 }
             }
         }
-        StateSource::Command { command } => run_command(command, cwd, command_timeout).await,
+        StateSource::Command { command } => {
+            run_command(command, cwd, command_timeout, cancel_rx).await
+        }
         StateSource::Native { native } => {
             if native == "git" {
                 let start_git = Instant::now();
@@ -179,10 +224,7 @@ pub async fn evaluate_state_source(
     }
 }
 
-pub fn start_timeout_tasks(
-    state: Arc<DaemonState>,
-    mut config_rx: tokio::sync::watch::Receiver<Config>,
-) {
+pub fn start_timeout_tasks(state: Arc<DaemonState>, mut config_rx: watch::Receiver<Config>) {
     tokio::spawn(async move {
         let mut active_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
@@ -257,16 +299,31 @@ pub async fn evaluate_scoped_state(
         }
         let command_timeout = Duration::from_secs(config.daemon.command_timeout_sec);
         loop {
+            let cancel_rx = {
+                let scoped_states = state.scoped_states.read().await;
+                scoped_states
+                    .get(&(name.clone(), scope_root.to_path_buf()))
+                    .map(|s| s.subscribe_cancel())
+            };
+            if cancel_rx.as_ref().is_none_or(|rx| *rx.borrow()) {
+                state.end_evaluation(name, scope_root).await;
+                break;
+            }
             if let Some(stdout) = evaluate_state_source(
                 name,
                 &state_config.source,
                 scope_root,
                 state,
                 command_timeout,
+                cancel_rx.clone(),
             )
             .await
             {
                 state.update_scoped_state(name, scope_root, &stdout).await;
+            }
+            if cancel_rx.as_ref().is_none_or(|rx| *rx.borrow()) {
+                state.end_evaluation(name, scope_root).await;
+                break;
             }
             if !state.finish_evaluation_step(name, scope_root).await {
                 break;
@@ -304,7 +361,7 @@ pub async fn evaluate_watch_tasks(
                         {
                             continue;
                         }
-                        if glob.is_match(rel_path) {
+                        if glob.is_match(rel_path) || glob.is_match(path) {
                             debug!("Noticed directory change: {:?}", path);
                             matched = true;
                             break;
@@ -332,8 +389,7 @@ mod tests {
 
     use std::collections::HashSet;
     use std::process::{self, Command as StdCommand};
-    use std::sync::Arc;
-    use tokio::sync::{RwLock, watch};
+    use tokio::sync::watch;
 
     #[tokio::test]
     async fn test_runner_reloads_on_config_change() {
@@ -356,10 +412,7 @@ mod tests {
         // Add a dummy ScopedState so the timeout task evaluates something
         state.scoped_states.write().await.insert(
             (StateId::from("test_1"), PathBuf::from("/")),
-            Arc::new(ScopedState {
-                subscribers: RwLock::new(HashSet::new()),
-                last_value: RwLock::new(None),
-            }),
+            ScopedState::new(HashSet::new()),
         );
 
         let (config_tx, config_rx) = watch::channel(config);
@@ -418,10 +471,7 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         state.scoped_states.write().await.insert(
             (StateId::from("rust_files"), cwd.path().to_path_buf()),
-            Arc::new(ScopedState {
-                subscribers: RwLock::new(HashSet::new()),
-                last_value: RwLock::new(None),
-            }),
+            ScopedState::new(HashSet::new()),
         );
 
         // No paths means forced evaluation
@@ -456,10 +506,7 @@ mod tests {
 
         state.scoped_states.write().await.insert(
             (StateId::from("test_fail"), PathBuf::from("/")),
-            Arc::new(ScopedState {
-                subscribers: RwLock::new(HashSet::new()),
-                last_value: RwLock::new(None),
-            }),
+            ScopedState::new(HashSet::new()),
         );
         let (_config_tx, config_rx) = watch::channel(config);
         start_timeout_tasks(state.clone(), config_rx);
@@ -473,14 +520,14 @@ mod tests {
     #[tokio::test]
     async fn test_run_command_success() {
         let temp = tempfile::tempdir().unwrap();
-        let out = run_command("echo hi", temp.path(), Duration::from_secs(10)).await;
+        let out = run_command("echo hi", temp.path(), Duration::from_secs(10), None).await;
         assert_eq!(out.as_deref(), Some("hi"));
     }
 
     #[tokio::test]
     async fn test_run_command_failure_returns_none() {
         let temp = tempfile::tempdir().unwrap();
-        let out = run_command("exit 1", temp.path(), Duration::from_secs(10)).await;
+        let out = run_command("exit 1", temp.path(), Duration::from_secs(10), None).await;
         assert!(out.is_none());
     }
 
@@ -488,7 +535,7 @@ mod tests {
     async fn test_run_command_timeout_kills_child() {
         let temp = tempfile::tempdir().unwrap();
         let start = Instant::now();
-        let out = run_command("sleep 60", temp.path(), Duration::from_millis(100)).await;
+        let out = run_command("sleep 60", temp.path(), Duration::from_millis(100), None).await;
         assert!(out.is_none());
         assert!(
             start.elapsed() < Duration::from_secs(5),
@@ -509,7 +556,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_command_output_capped() {
         let temp = tempfile::tempdir().unwrap();
-        let out = run_command("seq 1 50000", temp.path(), Duration::from_secs(5)).await;
+        let out = run_command("seq 1 50000", temp.path(), Duration::from_secs(5), None).await;
         let out = out.expect("command must succeed");
         assert!(
             out.len() <= MAX_COMMAND_OUTPUT_BYTES + 8,
@@ -573,10 +620,7 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         state.scoped_states.write().await.insert(
             (StateId::from("bad_glob"), cwd.path().to_path_buf()),
-            Arc::new(ScopedState {
-                subscribers: RwLock::new(HashSet::new()),
-                last_value: RwLock::new(None),
-            }),
+            ScopedState::new(HashSet::new()),
         );
         let affected = vec![cwd.path().join("test.txt")];
         evaluate_watch_tasks(&state, &config, Some(&affected)).await;
@@ -603,11 +647,215 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         state.scoped_states.write().await.insert(
             (StateId::from("fail_cmd"), cwd.path().to_path_buf()),
-            Arc::new(ScopedState {
-                subscribers: RwLock::new(HashSet::new()),
-                last_value: RwLock::new(None),
-            }),
+            ScopedState::new(HashSet::new()),
         );
         evaluate_watch_tasks(&state, &config, None).await;
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_state_source_file_and_native_and_spawn_error() {
+        let state = DaemonState::new();
+        let dir = tempfile::tempdir().unwrap();
+        let rel_file = dir.path().join("rel.txt");
+        let abs_file = dir.path().join("abs.txt");
+        tokio::fs::write(&rel_file, "  hello rel \n").await.unwrap();
+        tokio::fs::write(&abs_file, "  hello abs \n").await.unwrap();
+
+        let timeout = Duration::from_secs(5);
+        let id = StateId::from("file_test");
+
+        let out_rel = evaluate_state_source(
+            &id,
+            &StateSource::File {
+                file: "rel.txt".to_string(),
+            },
+            dir.path(),
+            &state,
+            timeout,
+            None,
+        )
+        .await;
+        assert_eq!(out_rel.as_deref(), Some("hello rel"));
+
+        let out_abs = evaluate_state_source(
+            &id,
+            &StateSource::File {
+                file: abs_file.to_string_lossy().to_string(),
+            },
+            Path::new("/tmp"),
+            &state,
+            timeout,
+            None,
+        )
+        .await;
+        assert_eq!(out_abs.as_deref(), Some("hello abs"));
+
+        let out_missing = evaluate_state_source(
+            &id,
+            &StateSource::File {
+                file: "nonexistent.txt".to_string(),
+            },
+            dir.path(),
+            &state,
+            timeout,
+            None,
+        )
+        .await;
+        assert!(out_missing.is_none());
+
+        // Native git outside a git repository
+        let out_git_non_repo = evaluate_state_source(
+            &StateId::git(),
+            &StateSource::Native {
+                native: "git".to_string(),
+            },
+            dir.path(),
+            &state,
+            timeout,
+            None,
+        )
+        .await;
+        assert_eq!(out_git_non_repo.as_deref(), Some(""));
+
+        // Unknown native source
+        let out_unknown_native = evaluate_state_source(
+            &StateId::from("other"),
+            &StateSource::Native {
+                native: "unknown".to_string(),
+            },
+            dir.path(),
+            &state,
+            timeout,
+            None,
+        )
+        .await;
+        assert!(out_unknown_native.is_none());
+
+        // Command spawn failure when cwd does not exist
+        let missing_cwd = dir.path().join("does_not_exist");
+        let out_spawn_err = run_command("echo hi", &missing_cwd, timeout, None).await;
+        assert!(out_spawn_err.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_run_command_and_scoped_state_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let scoped = ScopedState::new(HashSet::new());
+        let cancel_rx = scoped.subscribe_cancel();
+
+        let scoped_clone = scoped.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            scoped_clone.cancel();
+        });
+
+        let start = Instant::now();
+        let out = run_command(
+            "sleep 60",
+            dir.path(),
+            Duration::from_secs(60),
+            Some(cancel_rx),
+        )
+        .await;
+        assert!(out.is_none());
+        assert!(start.elapsed() < Duration::from_secs(5));
+
+        // Also test evaluate_scoped_state when scope is already cancelled
+        let state = DaemonState::new();
+        let mut config = Config::default();
+        let id = StateId::from("cancelled_cmd");
+        config.state.insert(
+            id.clone(),
+            StateConfig {
+                scope: Scope::Cwd,
+                source: StateSource::Command {
+                    command: "echo should_not_run".to_string(),
+                },
+                invalidate: StateInvalidate::default(),
+            },
+        );
+        let pre_cancelled = ScopedState::new(HashSet::new());
+        pre_cancelled.cancel();
+        state
+            .scoped_states
+            .write()
+            .await
+            .insert((id.clone(), dir.path().to_path_buf()), pre_cancelled);
+
+        evaluate_scoped_state(&id, dir.path(), &state, &config).await;
+        assert!(
+            state.begin_evaluation(&id, dir.path()).await,
+            "cancelled evaluation must clean up in_flight entry"
+        );
+        state.end_evaluation(&id, dir.path()).await;
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_watch_tasks_ignore_and_absolute_file() {
+        let state = DaemonState::new();
+        let dir = tempfile::tempdir().unwrap();
+        let watched_file = dir.path().join("watched.txt");
+        tokio::fs::write(&watched_file, "v1").await.unwrap();
+
+        let mut config = Config::default();
+        let id_ignore = StateId::from("with_ignore");
+        config.state.insert(
+            id_ignore.clone(),
+            StateConfig {
+                scope: Scope::Cwd,
+                source: StateSource::Command {
+                    command: "echo ran".to_string(),
+                },
+                invalidate: StateInvalidate {
+                    watch: Some("**/*.txt".to_string()),
+                    ignore: Some(vec!["ignored/**".to_string()]),
+                    ..Default::default()
+                },
+            },
+        );
+
+        let id_abs_file = StateId::from("abs_file");
+        config.state.insert(
+            id_abs_file.clone(),
+            StateConfig {
+                scope: Scope::Global,
+                source: StateSource::File {
+                    file: watched_file.to_string_lossy().to_string(),
+                },
+                invalidate: StateInvalidate::default(),
+            },
+        );
+
+        state.scoped_states.write().await.insert(
+            (id_ignore.clone(), dir.path().to_path_buf()),
+            ScopedState::new(HashSet::new()),
+        );
+        state.scoped_states.write().await.insert(
+            (id_abs_file.clone(), dir.path().to_path_buf()),
+            ScopedState::new(HashSet::new()),
+        );
+
+        // Ignored path must not trigger evaluation
+        let ignored_affected = vec![dir.path().join("ignored/secret.txt")];
+        evaluate_watch_tasks(&state, &config, Some(&ignored_affected)).await;
+        assert!(
+            state.scoped_states.read().await[&(id_ignore.clone(), dir.path().to_path_buf())]
+                .last_value
+                .read()
+                .await
+                .is_none()
+        );
+
+        // Absolute file path must match and evaluate
+        let file_affected = vec![watched_file];
+        evaluate_watch_tasks(&state, &config, Some(&file_affected)).await;
+        assert_eq!(
+            state.scoped_states.read().await[&(id_abs_file, dir.path().to_path_buf())]
+                .last_value
+                .read()
+                .await
+                .as_deref(),
+            Some("v1")
+        );
     }
 }

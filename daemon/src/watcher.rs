@@ -389,24 +389,41 @@ mod tests {
         let sub = temp.path().join("sub");
         fs::create_dir_all(&sub).unwrap();
 
+        let temp2 = tempfile::tempdir().unwrap();
+        let temp3 = tempfile::tempdir().unwrap();
+        let temp3_path = temp3.path().to_path_buf();
+
+        // Empty path and nonexistent path edge cases
+        watcher.watch(Path::new(""), &[]);
+        watcher.unwatch(Path::new(""));
+        watcher.watch(&temp.path().join("does_not_exist"), &[]);
+
         watcher.watch(temp.path(), &["git".to_string()]);
-        assert_eq!(watcher.get_watch_count(), 1);
+        // Duplicate watch on same path should be a no-op
+        watcher.watch(temp.path(), &["git".to_string()]);
+        watcher.watch(temp2.path(), &["git".to_string()]);
+        watcher.watch(&temp3_path, &["git".to_string()]);
+        assert_eq!(watcher.get_watch_count(), 3);
+
+        // Remove temp3 on disk while still in watched_paths so rebuild also exercises the re-watch error branch
+        drop(temp3);
 
         // Delete the watched subdirectory so the kernel auto-removes its inotify watch
         // and notify's internal paths map retains a stale WatchDescriptor.
         fs::remove_dir_all(&sub).unwrap();
 
         // Unwatching the parent directory must still remove it from watched_paths
-        // even if notify returns EINVAL (os error 22) for the deleted subdirectory.
+        // even if notify returns EINVAL (os error 22) for the deleted subdirectory,
+        // and rebuild the watcher for remaining active paths.
         watcher.unwatch(temp.path());
         assert_eq!(
             watcher.get_watch_count(),
-            0,
-            "watched_paths must not leak when unwatch encounters a deleted subdirectory"
+            2,
+            "watched_paths must remove temp.path() while keeping other paths"
         );
 
         // Re-watching the parent directory must succeed again.
         watcher.watch(temp.path(), &["git".to_string()]);
-        assert_eq!(watcher.get_watch_count(), 1);
+        assert_eq!(watcher.get_watch_count(), 3);
     }
 }
